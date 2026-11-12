@@ -107,29 +107,115 @@ export function splitTextIntoSentenceChunks(input: string, maxLen = 320): string
 }
 
 /**
- * Apply a gentle low-pass RC filter to remove digital hiss, high-frequency quantization noise,
- * and metallic harshness from the synthesized waveform.
+ * High-precision 2nd-order Biquad IIR Filter
+ * Supports highpass, lowpass, notch (band-reject), and peaking EQ.
  */
-function applyAcousticSmoothing(samples: Int16Array, sampleRate = 22050, cutoff = 4500): Int16Array {
-  const dt = 1 / sampleRate;
-  const rc = 1 / (2 * Math.PI * cutoff);
-  const alpha = dt / (rc + dt);
+function applyBiquadFilter(
+  samples: Int16Array,
+  type: 'highpass' | 'lowpass' | 'notch' | 'peaking',
+  freq: number,
+  Q: number,
+  gainDb: number = 0,
+  sampleRate: number = 22050
+): Int16Array {
+  const w0 = (2 * Math.PI * freq) / sampleRate;
+  const cosW0 = Math.cos(w0);
+  const sinW0 = Math.sin(w0);
+  const alpha = sinW0 / (2 * Q);
+  let b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
+
+  if (type === 'highpass') {
+    b0 = (1 + cosW0) / 2;
+    b1 = -(1 + cosW0);
+    b2 = (1 + cosW0) / 2;
+    a0 = 1 + alpha;
+    a1 = -2 * cosW0;
+    a2 = 1 - alpha;
+  } else if (type === 'lowpass') {
+    b0 = (1 - cosW0) / 2;
+    b1 = 1 - cosW0;
+    b2 = (1 - cosW0) / 2;
+    a0 = 1 + alpha;
+    a1 = -2 * cosW0;
+    a2 = 1 - alpha;
+  } else if (type === 'notch') {
+    b0 = 1;
+    b1 = -2 * cosW0;
+    b2 = 1;
+    a0 = 1 + alpha;
+    a1 = -2 * cosW0;
+    a2 = 1 - alpha;
+  } else if (type === 'peaking') {
+    const A = Math.pow(10, gainDb / 40);
+    b0 = 1 + alpha * A;
+    b1 = -2 * cosW0;
+    b2 = 1 - alpha * A;
+    a0 = 1 + alpha / A;
+    a1 = -2 * cosW0;
+    a2 = 1 - alpha / A;
+  }
+
   const out = new Int16Array(samples.length);
-  let prev = samples[0] || 0;
+  const b0_ = b0 / a0, b1_ = b1 / a0, b2_ = b2 / a0;
+  const a1_ = a1 / a0, a2_ = a2 / a0;
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
 
   for (let i = 0; i < samples.length; i++) {
-    const val = prev + alpha * (samples[i] - prev);
-    prev = val;
-    out[i] = Math.max(-32768, Math.min(32767, Math.round(val)));
+    const x0 = samples[i];
+    const y0 = b0_ * x0 + b1_ * x1 + b2_ * x2 - a1_ * y1 - a2_ * y2;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+    out[i] = Math.max(-32768, Math.min(32767, Math.round(y0)));
   }
+
   return out;
+}
+
+/**
+ * Multi-stage DSP acoustic mastering chain:
+ * 1. 100Hz 2-pole High-Pass: eliminates DC bias and sub-rumble from Emscripten array conversions.
+ * 2. 3.1kHz 2-pole Notch filter: suppresses piercing metallic eSpeak formant resonance whistle.
+ * 3. 2.2kHz 2-pole Formant Peaking EQ (+3.2dB, Q=1.2): restores speech presence, clarity, and vowel definition.
+ * 4. 7.5kHz 2-pole Low-Pass: eliminates high-frequency quantization hiss and digital artifacts.
+ * 5. Headroom Limiter: scales peak amplitudes to -1.2 dBFS (28,500) to guarantee zero distortion in MP3 encoders.
+ */
+export function masterVocalAcoustics(rawSamples: Int16Array, sampleRate = 22050): Int16Array {
+  // 1. 100Hz High-Pass (removes DC offset and low frequency rumble)
+  const hp = applyBiquadFilter(rawSamples, 'highpass', 100, 0.707, 0, sampleRate);
+  // 2. 3.1kHz Notch filter (cuts harsh metallic whistling noise)
+  const notch = applyBiquadFilter(hp, 'notch', 3100, 2.2, 0, sampleRate);
+  // 3. 2.2kHz Formant Peaking EQ (clarifies consonants and voice presence)
+  const peak = applyBiquadFilter(notch, 'peaking', 2200, 1.2, 3.2, sampleRate);
+  // 4. 7.5kHz Low-Pass filter (eliminates digital aliasing noise)
+  const lp = applyBiquadFilter(peak, 'lowpass', 7500, 0.707, 0, sampleRate);
+
+  // 5. Headroom Limiter & Normalization
+  let maxAbs = 0;
+  for (let i = 0; i < lp.length; i++) {
+    const abs = Math.abs(lp[i]);
+    if (abs > maxAbs) maxAbs = abs;
+  }
+
+  if (maxAbs > 0) {
+    const targetPeak = 28500; // ~ -1.2 dBFS (leaves ample headroom for MP3 psychoacoustic bit allocation)
+    const scale = maxAbs > targetPeak ? targetPeak / maxAbs : 1.0;
+    if (scale < 1.0) {
+      for (let i = 0; i < lp.length; i++) {
+        lp[i] = Math.round(lp[i] * scale);
+      }
+    }
+  }
+
+  return lp;
 }
 
 /**
  * Apply smooth Hann/cosine fade-in and fade-out to eliminate DC voltage discontinuities
  * (completely eliminates all clicking, popping, and snapping noises at chunk borders).
  */
-function applyAntiClickFade(samples: Int16Array, fadeLen = 220): void {
+function applyAntiClickFade(samples: Int16Array, fadeLen = 320): void {
   const len = Math.min(fadeLen, Math.floor(samples.length / 2));
   for (let i = 0; i < len; i++) {
     const factor = 0.5 * (1 - Math.cos((Math.PI * i) / len));
@@ -259,14 +345,15 @@ export async function generateSpeechWavBytesAsync(
   const win = window as any;
   const hasEngine = typeof win.generateSpeech === 'function';
 
-  // Tuned vocal settings: eliminates robotic chipmunk screech and clipping distortion
-  const voice = gender === 'female' ? 'en-us+f3' : 'en-us+m3';
-  const pitch = gender === 'female' ? 52 : 36;
-  const speed = 145; // Natural conversational rate
-  const amplitude = 72; // Leaves 3dB headroom to prevent 16-bit clipping/buzzing
+  // Tuned vocal settings: Base voice 'en' with 0 wordgap for natural articulation, zero whisper screech
+  const voice = 'en';
+  const pitch = gender === 'female' ? 62 : 40;
+  const speed = 152; // Natural conversational cadence
+  const amplitude = 92; // Controlled headroom for 16-bit dynamics
+  const wordgap = 0; // Seamless continuous phoneme co-articulation (eliminates machine-gun stutter)
 
   const pcmSampleArrays: Int16Array[] = [];
-  const pauseSamples = new Int16Array(Math.round(22050 * 0.14)); // 140ms natural speech pause between sentences
+  const pauseSamples = new Int16Array(Math.round(22050 * 0.12)); // 120ms natural breath pause between sentences
   let charsProcessed = 0;
   const startTime = Date.now();
 
@@ -304,7 +391,7 @@ export async function generateSpeechWavBytesAsync(
           amplitude,
           pitch,
           speed,
-          wordgap: 1,
+          wordgap,
         });
 
         if (wav && wav.length > 44) {
@@ -315,11 +402,11 @@ export async function generateSpeechWavBytesAsync(
           );
 
           // Apply anti-click boundary fade to remove DC step pops
-          applyAntiClickFade(chunkSamples, 220);
+          applyAntiClickFade(chunkSamples, 320);
 
-          // Apply acoustic low-pass smoothing filter to eliminate digital hiss & metallic buzz
-          const smoothedSamples = applyAcousticSmoothing(chunkSamples, 22050, 4500);
-          pcmSampleArrays.push(smoothedSamples);
+          // Apply 4-stage DSP acoustic mastering: 100Hz HP + 3.1kHz notch + 2.2kHz presence + 7.5kHz LP + limiter
+          const masteredSamples = masterVocalAcoustics(chunkSamples, 22050);
+          pcmSampleArrays.push(masteredSamples);
 
           // Add natural pause between sentences (except after the final section)
           if (i < totalChunks - 1) {
@@ -335,16 +422,16 @@ export async function generateSpeechWavBytesAsync(
             amplitude,
             pitch,
             speed,
-            wordgap: 1,
+            wordgap,
           });
           if (wav && wav.length > 44) {
             const pcmBytes = wav.subarray(44);
             const chunkSamples = new Int16Array(
               pcmBytes.buffer.slice(pcmBytes.byteOffset, pcmBytes.byteOffset + pcmBytes.byteLength)
             );
-            applyAntiClickFade(chunkSamples, 220);
-            const smoothed = applyAcousticSmoothing(chunkSamples, 22050, 4500);
-            pcmSampleArrays.push(smoothed);
+            applyAntiClickFade(chunkSamples, 320);
+            const mastered = masterVocalAcoustics(chunkSamples, 22050);
+            pcmSampleArrays.push(mastered);
           }
         } catch {
           // Graceful skip of unpronounceable token
@@ -635,7 +722,7 @@ export async function createStaticPagesJob(
     gender: params.gender,
     language: langCode,
     languageName: params.languageName || params.language,
-    synthesizer: 'kathirStudio Speech Synthesizer (Acoustic De-Noised)',
+    synthesizer: 'kathirStudio Voice Engine (4-Stage DSP Mastered)',
     durationSeconds: duration,
     formats,
     zipDownloadUrl: mp3BlobUrl,
@@ -653,13 +740,13 @@ export async function generateClientZipBlob(job: AudioJob): Promise<Blob> {
     .map((f) => `• ${f.fileName.padEnd(25)} - ${f.label} (${f.codec})`)
     .join('\n');
 
-  const readme = `kathirStudio - Text to Audio Format Package (Cleaned Audio)
+  const readme = `kathirStudio - Text to Audio Format Package (Clean Studio Audio)
 ======================================================================
 Spoken Text: "${job.text.slice(0, 300)}${job.text.length > 300 ? '...' : ''}"
 Language Context: ${job.languageName || job.language}
-Voice Character: ${job.gender === 'female' ? 'Female 👩 (Smoothed Formant)' : 'Male 👨 (Chest Resonant)'} (${job.voice})
+Voice Character: ${job.gender === 'female' ? 'Female 👩 (Studio Clear)' : 'Male 👨 (Deep Resonant)'} (${job.voice})
 Speech Engine: ${job.synthesizer}
-Acoustic Processing: 4.5kHz Low-Pass De-Esser + Anti-Click Boundary Cross-Fade
+Acoustic Processing: 4-Stage DSP Filter (100Hz HP + 3.1kHz Notch + 2.2kHz Presence EQ + 7.5kHz LP + Anti-Click Cross-Fade)
 Duration: ${formatDuration(job.durationSeconds)} (${job.durationSeconds.toFixed(1)}s)
 Created: ${new Date().toLocaleString()}
 

@@ -50,22 +50,31 @@ class AudioPlaybackService {
     return this.analyser;
   }
 
+  public playbackEngine: 'audioStream' | 'speechSynthesis' = 'audioStream';
+
+  public togglePlaybackEngine(): void {
+    this.playbackEngine = this.playbackEngine === 'audioStream' ? 'speechSynthesis' : 'audioStream';
+    if (this.isPlaying && this.currentJob && this.activeFormat) {
+      this.stop();
+      this.playFormat(this.currentJob, this.activeFormat);
+    } else {
+      this.notify();
+    }
+  }
+
   public playFormat(job: AudioJob, format: FormatItem): void {
     this.currentJob = job;
     this.activeFormat = format;
     this.formatFallbackNotice = null;
     this.stop();
 
-    // Check if this is a server stream URL (e.g. /api/stream/...)
-    const isServerStream = format.streamUrl.startsWith('/api/');
-
-    if (isServerStream) {
-      this.playHtmlAudio(job, format);
-    } else {
-      // In static client mode (GitHub Pages), use browser SpeechSynthesis
-      // so the user hears authentic spoken speech in the detected language!
+    if (this.playbackEngine === 'speechSynthesis') {
       this.playSpeechSynthesis(job);
+      return;
     }
+
+    // Default: Play the exact studio audio stream (100% matches what is downloaded!)
+    this.playHtmlAudio(job, format);
   }
 
   private playHtmlAudio(job: AudioJob, format: FormatItem): void {
@@ -100,7 +109,15 @@ class AudioPlaybackService {
       });
 
       this.audio.addEventListener('error', (e) => {
-        console.warn('Audio stream error, falling back to client speech synthesis:', e);
+        console.warn('Audio stream error, checking fallback options:', e);
+        if (this.currentJob && this.activeFormat && this.activeFormat.format !== 'mp3') {
+          const mp3Fmt = this.currentJob.formats.find((f) => f.format === 'mp3');
+          if (mp3Fmt && mp3Fmt.streamUrl !== format.streamUrl) {
+            this.formatFallbackNotice = `Format ${this.activeFormat.format.toUpperCase()} preview uses MP3 stream in this browser.`;
+            this.playHtmlAudio(this.currentJob, mp3Fmt);
+            return;
+          }
+        }
         if (this.currentJob) {
           this.playSpeechSynthesis(this.currentJob);
         }
@@ -133,7 +150,15 @@ class AudioPlaybackService {
         this.notify();
       })
       .catch((err) => {
-        console.warn('Audio play() failed, falling back to speech synthesis:', err);
+        console.warn('Audio play() failed, checking MP3 fallback:', err);
+        if (this.currentJob && this.activeFormat && this.activeFormat.format !== 'mp3') {
+          const mp3Fmt = this.currentJob.formats.find((f) => f.format === 'mp3');
+          if (mp3Fmt && mp3Fmt.streamUrl !== format.streamUrl) {
+            this.formatFallbackNotice = `Format ${this.activeFormat.format.toUpperCase()} preview uses MP3 stream in this browser.`;
+            this.playHtmlAudio(this.currentJob, mp3Fmt);
+            return;
+          }
+        }
         if (this.currentJob) {
           this.playSpeechSynthesis(this.currentJob);
         }

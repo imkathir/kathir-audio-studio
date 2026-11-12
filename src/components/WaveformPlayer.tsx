@@ -169,7 +169,31 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
               <User className="h-3 w-3 text-[var(--accent-primary)]" />
               <span>{genderLabel}</span>
             </span>
+            {/* Playback Source Toggle Button */}
+            <button
+              type="button"
+              onClick={() => audioService.togglePlaybackEngine()}
+              className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded border border-[var(--border-color)] bg-[var(--bg-input)] hover:border-[var(--accent-primary)] text-[var(--text-primary)] transition-colors cursor-pointer"
+              title="Toggle between exact downloadable audio stream and browser native speech synthesis"
+            >
+              {audioService.playbackEngine === 'audioStream' ? (
+                <>
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                  <span>Audio Stream (Exact Download)</span>
+                </>
+              ) : (
+                <>
+                  <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
+                  <span>Browser Speech API (OS Voice)</span>
+                </>
+              )}
+            </button>
           </div>
+          {audioService.formatFallbackNotice && (
+            <p className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded mt-1.5 inline-block">
+              ⚠️ {audioService.formatFallbackNotice}
+            </p>
+          )}
           <p className="text-[11px] text-[var(--text-muted)] mt-1">
             Codec: <span className="text-[var(--text-primary)] font-mono">{activeFormat.codec}</span> · MIME: <span className="font-mono">{activeFormat.mimeType}</span>
           </p>
