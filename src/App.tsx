@@ -19,6 +19,7 @@ export default function App() {
   const [activeFormat, setActiveFormat] = useState<FormatItem | null>(null);
   const [isConverting, setIsConverting] = useState<boolean>(false);
   const [conversionProgress, setConversionProgress] = useState<string>('');
+  const [conversionError, setConversionError] = useState<string | null>(null);
   const [progressInfo, setProgressInfo] = useState<ConversionProgressInfo | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -52,6 +53,16 @@ export default function App() {
     return unsub;
   }, []);
 
+  const applyCompletedJob = (jobData: AudioJob) => {
+    setCurrentJob(jobData);
+    audioService.currentJob = jobData;
+    const defaultFmt = jobData.formats.find((f) => f.format === 'mp3') || jobData.formats[0];
+    if (defaultFmt) {
+      setActiveFormat(defaultFmt);
+      audioService.activeFormat = defaultFmt;
+    }
+  };
+
   const handleConvert = async (params: {
     text: string;
     voice: string;
@@ -63,8 +74,10 @@ export default function App() {
     bitrate: string;
     title: string;
     formats: string[];
+    isAutoInit?: boolean;
   }) => {
     setIsConverting(true);
+    setConversionError(null);
     const initialText =
       params.text.length > 2000
         ? `Preparing full document (${Math.round(params.text.length / 1000)}k chars) across sections...`
@@ -82,24 +95,19 @@ export default function App() {
 
     const isGitHubPages = window.location.hostname.includes('github.io');
     const customBackend = localStorage.getItem('kathir_tts_backend_url') || '';
+    const baseBackend = customBackend ? customBackend.replace(/\/+$/, '') : '';
 
-    // On GitHub Pages (or static hosting), execute the client-side speech engine with live chunk progress
+    // On GitHub Pages (or static hosting without custom backend), execute the client-side neural engine
     if (isGitHubPages && !customBackend) {
       try {
         const clientJob = await createStaticPagesJob(params, (info) => {
           setProgressInfo(info);
           setConversionProgress(info.statusText);
         });
-        setCurrentJob(clientJob);
-        audioService.currentJob = clientJob;
-
-        const defaultFmt = clientJob.formats.find((f) => f.format === 'mp3') || clientJob.formats[0];
-        if (defaultFmt) {
-          setActiveFormat(defaultFmt);
-          audioService.activeFormat = defaultFmt;
-        }
+        applyCompletedJob(clientJob);
       } catch (err: any) {
         console.error('Client speech synthesis error:', err);
+        setConversionError(err?.message || 'Speech synthesis failed. Please try again.');
       } finally {
         setIsConverting(false);
         setProgressInfo(null);
@@ -108,58 +116,80 @@ export default function App() {
       return;
     }
 
-    // Otherwise call backend server (local Express server or user-configured custom backend)
-    const endpoint = customBackend
-      ? `${customBackend.replace(/\/+$/, '')}/api/convert`
-      : '/api/convert';
-
+    // Call Express backend using non-blocking /api/convert-async + polling so long 60k+ texts never time out
     try {
-      const res = await fetch(endpoint, {
+      const asyncEndpoint = `${baseBackend}/api/convert-async`;
+      const startRes = await fetch(asyncEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
       });
 
-      if (!res.ok) {
+      if (startRes.ok) {
+        const { asyncJobId } = await startRes.json();
+        const statusUrl = `${baseBackend}/api/job-status/${asyncJobId}`;
+
+        // Poll job status until completed or failed
+        while (true) {
+          await new Promise((r) => setTimeout(r, 700));
+          const pollRes = await fetch(statusUrl);
+          if (!pollRes.ok) {
+            throw new Error(`Status check failed (HTTP ${pollRes.status})`);
+          }
+          const state = await pollRes.json();
+
+          if (state.status === 'processing') {
+            const pct = typeof state.percent === 'number' ? state.percent : 10;
+            const statusText = state.statusText || 'Synthesizing Neural Speech...';
+            setConversionProgress(statusText);
+            setProgressInfo({
+              status: pct >= 88 ? 'encoding' : 'synthesizing',
+              percent: pct,
+              currentChunk: state.currentChunk || 1,
+              totalChunks: state.totalChunks || 1,
+              statusText,
+              charsProcessed: state.charsProcessed || 0,
+              totalChars: state.totalChars || params.text.length,
+            });
+          } else if (state.status === 'completed' && state.result) {
+            applyCompletedJob(state.result as AudioJob);
+            return;
+          } else if (state.status === 'failed') {
+            throw new Error(state.error || 'Server conversion failed');
+          }
+        }
+      }
+
+      // If /api/convert-async doesn't exist (404), try synchronous /api/convert
+      if (startRes.status === 404) {
+        const syncEndpoint = `${baseBackend}/api/convert`;
+        const res = await fetch(syncEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params),
+        });
+        if (res.ok) {
+          setConversionProgress(
+            `Transcoding into ${params.formats.length} selected audio format${params.formats.length !== 1 ? 's' : ''}...`
+          );
+          const data: AudioJob = await res.json();
+          applyCompletedJob(data);
+          return;
+        }
+      }
+
+      throw new Error(`Backend returned HTTP ${startRes.status}`);
+    } catch (err: any) {
+      console.warn('Backend synthesis unavailable or failed, using browser speech engine:', err);
+      try {
         const clientJob = await createStaticPagesJob(params, (info) => {
           setProgressInfo(info);
           setConversionProgress(info.statusText);
         });
-        setCurrentJob(clientJob);
-        audioService.currentJob = clientJob;
-        const defaultFmt = clientJob.formats.find((f) => f.format === 'mp3') || clientJob.formats[0];
-        if (defaultFmt) {
-          setActiveFormat(defaultFmt);
-          audioService.activeFormat = defaultFmt;
-        }
-        return;
-      }
-
-      setConversionProgress(
-        `Transcoding into ${params.formats.length} selected audio format${params.formats.length !== 1 ? 's' : ''}...`
-      );
-      const data: AudioJob = await res.json();
-
-      setCurrentJob(data);
-      audioService.currentJob = data;
-
-      const defaultFmt = data.formats.find((f) => f.format === 'mp3') || data.formats[0];
-      if (defaultFmt) {
-        setActiveFormat(defaultFmt);
-        audioService.activeFormat = defaultFmt;
-      }
-    } catch (err: any) {
-      console.warn('Backend server unreachable, falling back to client-side speech engine:', err);
-      const clientJob = await createStaticPagesJob(params, (info) => {
-        setProgressInfo(info);
-        setConversionProgress(info.statusText);
-      });
-      setCurrentJob(clientJob);
-      audioService.currentJob = clientJob;
-      const defaultFmt = clientJob.formats.find((f) => f.format === 'mp3') || clientJob.formats[0];
-      if (defaultFmt) {
-        setActiveFormat(defaultFmt);
-        audioService.activeFormat = defaultFmt;
+        applyCompletedJob(clientJob);
+      } catch (clientErr: any) {
+        console.error('Fallback browser speech synthesis also failed:', clientErr);
+        setConversionError(clientErr?.message || err?.message || 'Speech conversion failed.');
       }
     } finally {
       setIsConverting(false);
@@ -180,6 +210,7 @@ export default function App() {
       bitrate: '192k',
       title: 'kathirStudio_Welcome',
       formats: ['mp3', 'm4a'],
+      isAutoInit: true,
     });
   }, []);
 
@@ -237,6 +268,19 @@ export default function App() {
 
         {/* Studio Layout */}
         <div className="space-y-8">
+          {conversionError && (
+            <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-300 flex items-center justify-between gap-3">
+              <span>{conversionError}</span>
+              <button
+                type="button"
+                onClick={() => setConversionError(null)}
+                className="text-rose-200 hover:underline font-semibold shrink-0 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
           {/* Input Panel with Language Detection & Gender Switcher */}
           <AudioInputPanel
             onConvert={handleConvert}

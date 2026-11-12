@@ -157,6 +157,21 @@ interface ConversionJob {
 
 const conversions = new Map<string, ConversionJob>();
 
+interface AsyncJobState {
+  id: string;
+  status: 'processing' | 'completed' | 'failed';
+  percent: number;
+  currentChunk: number;
+  totalChunks: number;
+  statusText: string;
+  charsProcessed: number;
+  totalChars: number;
+  result?: any;
+  error?: string;
+}
+
+const asyncJobs = new Map<string, AsyncJobState>();
+
 // Retrieve job from memory or recover from disk storage
 function getJob(jobId: string): ConversionJob | null {
   if (conversions.has(jobId)) {
@@ -368,6 +383,21 @@ function splitIntoParagraphChunks(text: string, maxChunkLength = 3500): string[]
   return chunks;
 }
 
+function sanitizeForGoogleTTS(input: string): string {
+  if (!input) return '';
+  return input
+    .replace(/\$\s*\\to\s*\$/g, ' to ')
+    .replace(/->|→|⇒/g, ' to ')
+    .replace(/#{1,6}\s+/g, '')
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[—–]/g, ', ')
+    .replace(/[|{}[\]<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Generate genuine spoken speech audio with language & authentic male/female neural voices
 async function generateSpeechWav(
   text: string,
@@ -375,7 +405,8 @@ async function generateSpeechWav(
   gender: 'female' | 'male',
   requestedLanguage: string,
   speechStyle: string,
-  outputPath: string
+  outputPath: string,
+  onProgress?: (info: { percent: number; currentChunk: number; totalChunks: number; statusText: string; charsProcessed: number }) => void
 ): Promise<{ duration: number; engine: string; langCode: string; langName: string }> {
   // Determine target language
   let langInfo: { code: string; name: string };
@@ -425,7 +456,7 @@ async function generateSpeechWav(
             role: 'user',
             parts: [
               {
-                text: text, // FULL TEXT - No 3000-char truncation
+                text: text,
                 speechMetadata: {
                   style: effectiveStyle,
                 },
@@ -459,32 +490,63 @@ async function generateSpeechWav(
   // 2. High-Capacity Chunked Synthesis: Converts 100% of text without truncation (supports full books, 60k+ chars, 80+ minutes)
   if (!success) {
     try {
-      const chunks = splitIntoParagraphChunks(text, 3500);
-      console.log(`Synthesizing full text across ${chunks.length} clean section chunk(s)... Total length: ${text.length} chars`);
+      const cleanText = sanitizeForGoogleTTS(text);
+      const chunks = splitIntoParagraphChunks(cleanText, 1200);
+      console.log(`Synthesizing full text across ${chunks.length} clean section chunk(s)... Total length: ${cleanText.length} chars`);
 
       const audioBuffers: Buffer[] = [];
+      let charsDone = 0;
 
       for (let i = 0; i < chunks.length; i++) {
         const chunkText = chunks[i];
         if (!chunkText.trim()) continue;
 
-        const chunkAudio = await googleTTS.getAllAudioBase64(chunkText, {
-          lang: langInfo.code,
-          slow: false,
-          timeout: 25000,
+        onProgress?.({
+          percent: Math.min(85, Math.max(5, Math.round(((i + 1) / chunks.length) * 85))),
+          currentChunk: i + 1,
+          totalChunks: chunks.length,
+          statusText: `Synthesizing Neural Speech section ${i + 1} of ${chunks.length}...`,
+          charsProcessed: charsDone,
         });
+
+        let chunkAudio: Array<{ shortText: string; base64: string }> = [];
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            chunkAudio = await googleTTS.getAllAudioBase64(chunkText, {
+              lang: langInfo.code,
+              slow: false,
+              timeout: 20000,
+            });
+            break;
+          } catch (chunkErr: any) {
+            if (attempt === 3) throw chunkErr;
+            await new Promise((r) => setTimeout(r, 400 * attempt));
+          }
+        }
 
         for (const part of chunkAudio) {
           audioBuffers.push(Buffer.from(part.base64, 'base64'));
         }
+        charsDone += chunkText.length;
       }
 
+      onProgress?.({
+        percent: 88,
+        currentChunk: chunks.length,
+        totalChunks: chunks.length,
+        statusText: 'Mastering clean WAV & transcoding audio formats...',
+        charsProcessed: cleanText.length,
+      });
+
       const combinedMp3 = Buffer.concat(audioBuffers);
+      if (combinedMp3.length === 0) {
+        throw new Error('Speech synthesis produced empty audio buffers');
+      }
       const tempMp3Path = `${outputPath}.tmp.mp3`;
       fs.writeFileSync(tempMp3Path, combinedMp3);
 
-      // Clean audio normalization and mastering filter
-      const acousticFilter = '-af "loudnorm=I=-16:TP=-1.5:LRA=11,volume=1.05"';
+      // Fast streaming filter (avoids loudnorm multi-minute memory stall on 60+ min files)
+      const acousticFilter = '-af "highpass=f=80,volume=1.08"';
 
       await execPromise(`ffmpeg -y -i "${tempMp3Path}" ${acousticFilter} -c:a pcm_s16le "${outputPath}"`);
       if (fs.existsSync(tempMp3Path)) {
@@ -549,124 +611,190 @@ app.get('/api/history', (_req, res) => {
   res.json(list);
 });
 
-// Primary Convert API
+async function executeConversionJob(
+  body: any,
+  onProgress?: (info: { percent: number; currentChunk: number; totalChunks: number; statusText: string; charsProcessed: number }) => void
+) {
+  const {
+    text,
+    voice = 'Kore',
+    gender = 'female',
+    language = 'auto',
+    speechStyle = 'Natural, clear studio voice',
+    sampleRate = 44100,
+    bitrate = '192k',
+    title = 'Kathir_Audio',
+    formats = undefined,
+  } = body;
+
+  const jobId = `tts_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const jobDir = path.join(AUDIO_STORAGE_DIR, jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+
+  const cleanTitle = sanitizeFilename(title);
+  const sourceWavPath = path.join(jobDir, `${cleanTitle}_master.wav`);
+
+  const { duration, engine, langCode, langName } = await generateSpeechWav(
+    text,
+    voice,
+    gender as 'female' | 'male',
+    language,
+    speechStyle,
+    sourceWavPath,
+    onProgress
+  );
+
+  const jobResult: ConversionJob = {
+    id: jobId,
+    text,
+    voice,
+    gender: gender as 'female' | 'male',
+    language: langCode,
+    languageName: langName,
+    timestamp: Date.now(),
+    durationSeconds: duration,
+    synthesizer: engine,
+    formats: {},
+  };
+
+  let selectedKeys: string[] = [];
+  if (Array.isArray(formats) && formats.length > 0) {
+    selectedKeys = formats
+      .map((f: string) => String(f).toLowerCase().trim())
+      .filter((f: string) => FORMAT_SPECS[f]);
+  }
+  if (selectedKeys.length === 0) {
+    selectedKeys = Object.keys(FORMAT_SPECS);
+  }
+
+  for (let idx = 0; idx < selectedKeys.length; idx++) {
+    const key = selectedKeys[idx];
+    const spec = FORMAT_SPECS[key];
+    if (!spec) continue;
+
+    onProgress?.({
+      percent: 88 + Math.round(((idx + 1) / selectedKeys.length) * 11),
+      currentChunk: idx + 1,
+      totalChunks: selectedKeys.length,
+      statusText: `Encoding ${spec.label} (${idx + 1}/${selectedKeys.length})...`,
+      charsProcessed: text.length,
+    });
+
+    const outFileName = `${cleanTitle}.${spec.ext}`;
+    const outFilePath = path.join(jobDir, outFileName);
+
+    const ffmpegCmd = spec.buildArgs(sourceWavPath, outFilePath, sampleRate, bitrate, cleanTitle);
+    await execPromise(ffmpegCmd);
+
+    const stats = fs.statSync(outFilePath);
+    jobResult.formats[key] = {
+      filePath: outFilePath,
+      fileName: outFileName,
+      mimeType: spec.mime,
+      size: stats.size,
+      codec: spec.codec,
+      label: spec.label,
+      category: spec.category,
+      description: spec.description,
+    };
+  }
+
+  conversions.set(jobId, jobResult);
+
+  try {
+    fs.writeFileSync(path.join(jobDir, 'job.json'), JSON.stringify(jobResult, null, 2));
+  } catch (e) {
+    console.warn('Could not cache job.json:', e);
+  }
+
+  return {
+    success: true,
+    jobId,
+    text,
+    voice,
+    gender,
+    language: langCode,
+    languageName: langName,
+    synthesizer: engine,
+    durationSeconds: duration,
+    formats: Object.entries(jobResult.formats).map(([key, item]) => ({
+      format: key,
+      fileName: item.fileName,
+      mimeType: item.mimeType,
+      size: item.size,
+      codec: item.codec,
+      label: item.label,
+      category: item.category,
+      recommendedFor: item.description,
+      streamUrl: `/api/audio/${jobId}/${key}`,
+      downloadUrl: `/api/download/${jobId}/${key}`,
+    })),
+    zipDownloadUrl: `/api/download-zip/${jobId}`,
+  };
+}
+
+// Non-blocking Async Convert API (zero HTTP timeout on huge 60k+ char texts)
+app.post('/api/convert-async', (req, res) => {
+  const { text } = req.body || {};
+  if (!text || !String(text).trim()) {
+    res.status(400).json({ error: 'Text content is required' });
+    return;
+  }
+
+  const asyncJobId = `async_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const state: AsyncJobState = {
+    id: asyncJobId,
+    status: 'processing',
+    percent: 4,
+    currentChunk: 0,
+    totalChunks: Math.max(1, Math.ceil(String(text).length / 1200)),
+    statusText: 'Starting Neural Speech synthesis on server...',
+    charsProcessed: 0,
+    totalChars: String(text).length,
+  };
+  asyncJobs.set(asyncJobId, state);
+
+  executeConversionJob(req.body, (info) => {
+    state.percent = info.percent;
+    state.currentChunk = info.currentChunk;
+    state.totalChunks = info.totalChunks;
+    state.statusText = info.statusText;
+    state.charsProcessed = info.charsProcessed;
+  })
+    .then((result) => {
+      state.status = 'completed';
+      state.percent = 100;
+      state.statusText = 'Complete!';
+      state.result = result;
+    })
+    .catch((err: any) => {
+      console.error('Async conversion failed:', err);
+      state.status = 'failed';
+      state.error = err?.message || 'Conversion failed';
+    });
+
+  res.json({ asyncJobId });
+});
+
+app.get('/api/job-status/:asyncJobId', (req, res) => {
+  const state = asyncJobs.get(req.params.asyncJobId);
+  if (!state) {
+    res.status(404).json({ error: 'Job not found' });
+    return;
+  }
+  res.json(state);
+});
+
+// Primary synchronous Convert API
 app.post('/api/convert', async (req, res) => {
   try {
-    const {
-      text,
-      voice = 'Kore',
-      gender = 'female',
-      language = 'auto',
-      speechStyle = 'Natural, clear studio voice',
-      sampleRate = 44100,
-      bitrate = '192k',
-      title = 'Kathir_Audio',
-      formats = undefined,
-    } = req.body;
-
+    const { text } = req.body;
     if (!text || !text.trim()) {
       res.status(400).json({ error: 'Text content is required' });
       return;
     }
-
-    const jobId = `tts_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const jobDir = path.join(AUDIO_STORAGE_DIR, jobId);
-    fs.mkdirSync(jobDir, { recursive: true });
-
-    const cleanTitle = sanitizeFilename(title);
-    const sourceWavPath = path.join(jobDir, `${cleanTitle}_master.wav`);
-
-    // 1. Synthesize Speech Audio
-    const { duration, engine, langCode, langName } = await generateSpeechWav(
-      text,
-      voice,
-      gender as 'female' | 'male',
-      language,
-      speechStyle,
-      sourceWavPath
-    );
-
-    const jobResult: ConversionJob = {
-      id: jobId,
-      text,
-      voice,
-      gender: gender as 'female' | 'male',
-      language: langCode,
-      languageName: langName,
-      timestamp: Date.now(),
-      durationSeconds: duration,
-      synthesizer: engine,
-      formats: {},
-    };
-
-    // Filter which formats to transcode: user-selected or default to all if omitted
-    let selectedKeys: string[] = [];
-    if (Array.isArray(formats) && formats.length > 0) {
-      selectedKeys = formats
-        .map((f: string) => String(f).toLowerCase().trim())
-        .filter((f: string) => FORMAT_SPECS[f]);
-    }
-    if (selectedKeys.length === 0) {
-      selectedKeys = Object.keys(FORMAT_SPECS);
-    }
-
-    // 2. Encode only the selected audio formats
-    for (const key of selectedKeys) {
-      const spec = FORMAT_SPECS[key];
-      if (!spec) continue;
-
-      const outFileName = `${cleanTitle}.${spec.ext}`;
-      const outFilePath = path.join(jobDir, outFileName);
-
-      const ffmpegCmd = spec.buildArgs(sourceWavPath, outFilePath, sampleRate, bitrate, cleanTitle);
-      await execPromise(ffmpegCmd);
-
-      const stats = fs.statSync(outFilePath);
-      jobResult.formats[key] = {
-        filePath: outFilePath,
-        fileName: outFileName,
-        mimeType: spec.mime,
-        size: stats.size,
-        codec: spec.codec,
-        label: spec.label,
-        category: spec.category,
-        description: spec.description,
-      };
-    }
-
-    conversions.set(jobId, jobResult);
-
-    // Persist job metadata to disk for instant recovery across restarts
-    try {
-      fs.writeFileSync(path.join(jobDir, 'job.json'), JSON.stringify(jobResult, null, 2));
-    } catch (e) {
-      console.warn('Could not cache job.json:', e);
-    }
-
-    res.json({
-      success: true,
-      jobId,
-      text,
-      voice,
-      gender,
-      language: langCode,
-      languageName: langName,
-      synthesizer: engine,
-      durationSeconds: duration,
-      formats: Object.entries(jobResult.formats).map(([key, item]) => ({
-        format: key,
-        fileName: item.fileName,
-        mimeType: item.mimeType,
-        size: item.size,
-        codec: item.codec,
-        label: item.label,
-        category: item.category,
-        recommendedFor: item.description,
-        streamUrl: `/api/audio/${jobId}/${key}`,
-        downloadUrl: `/api/download/${jobId}/${key}`,
-      })),
-      zipDownloadUrl: `/api/download-zip/${jobId}`,
-    });
+    const payload = await executeConversionJob(req.body);
+    res.json(payload);
   } catch (error: any) {
     console.error('Conversion failed:', error);
     res.status(500).json({ error: error?.message || 'Text-to-Speech conversion failed' });
@@ -745,7 +873,13 @@ app.get('/api/download-zip/:jobId', (req, res) => {
     return;
   }
 
-  const archive = new (ZipArchive as any)({ zlib: { level: 9 } });
+  const archive = new ZipArchive({ zlib: { level: 9 } });
+  archive.on('error', (err) => {
+    console.error('ZIP archive error:', err);
+    if (!res.headersSent) {
+      res.status(500).send('ZIP packaging failed');
+    }
+  });
 
   const formatCount = Object.keys(job.formats).length;
   res.setHeader('Content-Type', 'application/zip');

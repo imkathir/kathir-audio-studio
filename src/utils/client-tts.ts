@@ -1,5 +1,48 @@
 import JSZip from 'jszip';
+import {
+  TtsSession,
+  stored as getStoredPiperVoices,
+  INFERENCE_PROGRESS_URL,
+  type VoiceId,
+} from '@mintplex-labs/piper-tts-web';
 import { AudioJob, FormatItem, ConversionProgressInfo } from '../types';
+
+const PIPER_VOICE_MAP: Record<string, { female: VoiceId; male: VoiceId }> = {
+  en: { female: 'en_US-amy-low', male: 'en_US-ryan-low' },
+  es: { female: 'es_ES-mls_9972-low', male: 'es_ES-carlfm-x_low' },
+  fr: { female: 'fr_FR-siwis-low', male: 'fr_FR-gilles-low' },
+  de: { female: 'de_DE-kerstin-low', male: 'de_DE-thorsten-low' },
+  it: { female: 'it_IT-paola-medium', male: 'it_IT-riccardo-x_low' },
+  pt: { female: 'pt_BR-faber-medium', male: 'pt_BR-edresson-low' },
+  nl: { female: 'nl_NL-mls_5809-low', male: 'nl_NL-mls_7432-low' },
+  ru: { female: 'ru_RU-irina-medium', male: 'ru_RU-dmitri-medium' },
+  ar: { female: 'ar_JO-kareem-low', male: 'ar_JO-kareem-low' },
+  zh: { female: 'zh_CN-huayan-x_low', male: 'zh_CN-huayan-x_low' },
+  tr: { female: 'tr_TR-dfki-medium', male: 'tr_TR-fahrettin-medium' },
+  vi: { female: 'vi_VN-vivos-x_low', male: 'vi_VN-25hours_single-low' },
+  uk: { female: 'uk_UA-lada-x_low', male: 'uk_UA-lada-x_low' },
+};
+
+/**
+ * Light mastering for neural VITS speech: removes DC offset (80Hz high-pass)
+ * and limits peaks cleanly without altering natural human vocal formants.
+ */
+function masterNeuralAcoustics(rawSamples: Int16Array, sampleRate: number): Int16Array {
+  const hp = applyBiquadFilter(rawSamples, 'highpass', 80, 0.707, 0, sampleRate);
+  let maxAbs = 0;
+  for (let i = 0; i < hp.length; i++) {
+    const abs = Math.abs(hp[i]);
+    if (abs > maxAbs) maxAbs = abs;
+  }
+  if (maxAbs > 0) {
+    const targetPeak = 29000;
+    const scale = maxAbs > targetPeak ? targetPeak / maxAbs : Math.min(1.15, targetPeak / maxAbs);
+    for (let i = 0; i < hp.length; i++) {
+      hp[i] = Math.max(-32768, Math.min(32767, Math.round(hp[i] * scale)));
+    }
+  }
+  return hp;
+}
 
 /**
  * Intelligent text sanitizer:
@@ -318,17 +361,150 @@ export async function ensureSpeechEnginesLoaded(): Promise<boolean> {
 }
 
 /**
+ * Synthesize real human neural speech in the browser using Piper VITS ONNX models.
+ * Returns null if the language isn't available or browser WASM/OPFS fails so caller can fall back cleanly.
+ */
+async function synthesizeWithPiperNeural(
+  chunks: string[],
+  langCode: string,
+  gender: 'female' | 'male',
+  totalChars: number,
+  preferFastOffline: boolean,
+  onProgress?: (info: ConversionProgressInfo) => void
+): Promise<{
+  pcmArrays: Int16Array[];
+  sampleRate: number;
+  voiceId: VoiceId;
+} | null> {
+  const voicePair = PIPER_VOICE_MAP[langCode];
+  if (!voicePair) return null;
+
+  const voiceId: VoiceId = gender === 'male' ? voicePair.male : voicePair.female;
+
+  // On initial background welcome load, only use Piper if the neural voice is already cached in OPFS
+  if (preferFastOffline) {
+    try {
+      const cached = await getStoredPiperVoices();
+      if (!cached.includes(voiceId)) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const totalChunks = chunks.length;
+    if (TtsSession._instance && TtsSession._instance.voiceId !== voiceId) {
+      TtsSession._instance = null;
+    }
+
+    onProgress?.({
+      status: 'analyzing',
+      percent: 5,
+      currentChunk: 0,
+      totalChunks,
+      statusText: `Loading Neural Voice (${voiceId})...`,
+      charsProcessed: 0,
+      totalChars,
+    });
+
+    const session = await TtsSession.create({
+      voiceId,
+      progress: (p) => {
+        if (p.url === INFERENCE_PROGRESS_URL) return;
+        if (p.total > 0) {
+          const dlPct = Math.round((p.loaded / p.total) * 100);
+          onProgress?.({
+            status: 'analyzing',
+            percent: Math.min(20, Math.max(4, Math.round(dlPct * 0.2))),
+            currentChunk: 0,
+            totalChunks,
+            statusText: `Downloading Neural Voice model (${dlPct}% · cached offline after first run)...`,
+            charsProcessed: 0,
+            totalChars,
+          });
+        }
+      },
+    });
+
+    const pcmArrays: Int16Array[] = [];
+    let detectedSampleRate = 16000;
+    let pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.14));
+    let charsProcessed = 0;
+    const startTime = Date.now();
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkText = chunks[i];
+      charsProcessed += chunkText.length;
+      const progressPercent = Math.min(94, Math.max(20, 20 + Math.round(((i + 1) / totalChunks) * 74)));
+
+      const elapsedMs = Date.now() - startTime;
+      const avgMsPerChunk = elapsedMs / (i + 1);
+      const remainingChunks = totalChunks - (i + 1);
+      const estimatedRemainingSec = Math.max(0, Math.round((remainingChunks * avgMsPerChunk) / 1000));
+      const snippet = chunkText.slice(0, 45).replace(/\s+/g, ' ');
+
+      onProgress?.({
+        status: 'synthesizing',
+        percent: progressPercent,
+        currentChunk: i + 1,
+        totalChunks,
+        statusText: `Neural Voice section ${i + 1} of ${totalChunks}: "${snippet}..."`,
+        charsProcessed,
+        totalChars,
+        estimatedRemainingSec,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const wavBlob = await session.predict(chunkText);
+      const wavBuf = await wavBlob.arrayBuffer();
+      if (wavBuf.byteLength > 44) {
+        const wavView = new DataView(wavBuf);
+        const chunkRate = wavView.getUint32(24, true);
+        if (chunkRate >= 8000 && chunkRate <= 48000 && i === 0) {
+          detectedSampleRate = chunkRate;
+          pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.14));
+        }
+
+        const pcmByteLen = wavBuf.byteLength - 44;
+        const chunkSamples = new Int16Array(wavBuf.slice(44, 44 + pcmByteLen - (pcmByteLen % 2)));
+        applyAntiClickFade(chunkSamples, 220);
+        const mastered = masterNeuralAcoustics(chunkSamples, detectedSampleRate);
+        pcmArrays.push(mastered);
+
+        if (i < totalChunks - 1) {
+          pcmArrays.push(pauseSamples);
+        }
+      }
+    }
+
+    if (pcmArrays.length === 0) {
+      return null;
+    }
+
+    return { pcmArrays, sampleRate: detectedSampleRate, voiceId };
+  } catch (err) {
+    console.warn('Piper Neural TTS fallback to local speech engine:', err);
+    return null;
+  }
+}
+
+/**
  * Asynchronously synthesize speech with real-time progress callbacks, acoustic filtering,
  * anti-click boundary smoothing, natural sentence pauses, and true MP3 encoding.
  */
 export async function generateSpeechWavBytesAsync(
   text: string,
   gender: 'female' | 'male' = 'female',
-  onProgress?: (info: ConversionProgressInfo) => void
-): Promise<{ blob: Blob; mp3Blob: Blob | null; duration: number }> {
+  onProgress?: (info: ConversionProgressInfo) => void,
+  options?: { language?: string; preferFastOffline?: boolean }
+): Promise<{ blob: Blob; mp3Blob: Blob | null; duration: number; engineLabel: string; sampleRate: number }> {
   const chunks = splitTextIntoSentenceChunks(text, 320);
   const totalChunks = chunks.length;
   const totalChars = text.length;
+  const langCode = ((options?.language === 'auto' ? 'en' : options?.language) || 'en').split('-')[0].toLowerCase();
 
   onProgress?.({
     status: 'analyzing',
@@ -340,51 +516,70 @@ export async function generateSpeechWavBytesAsync(
     totalChars,
   });
 
-  // Ensure speech generator and lamejs are loaded
+  // Ensure lamejs (and fallback speakGenerator.js) are loaded
   await ensureSpeechEnginesLoaded();
   const win = window as any;
-  const hasEngine = typeof win.generateSpeech === 'function';
 
-  // Tuned vocal settings: Base voice 'en' with 0 wordgap for natural articulation, zero whisper screech
-  const voice = 'en';
-  const pitch = gender === 'female' ? 62 : 40;
-  const speed = 152; // Natural conversational cadence
-  const amplitude = 92; // Controlled headroom for 16-bit dynamics
-  const wordgap = 0; // Seamless continuous phoneme co-articulation (eliminates machine-gun stutter)
+  let pcmSampleArrays: Int16Array[] = [];
+  let sampleRate = 22050;
+  let engineLabel = 'kathirStudio Voice Engine (4-Stage DSP Mastered)';
 
-  const pcmSampleArrays: Int16Array[] = [];
-  const pauseSamples = new Int16Array(Math.round(22050 * 0.12)); // 120ms natural breath pause between sentences
-  let charsProcessed = 0;
-  const startTime = Date.now();
+  // 1. Primary browser neural VITS human speech (cached in OPFS after first download)
+  const piperResult = await synthesizeWithPiperNeural(
+    chunks,
+    langCode,
+    gender,
+    totalChars,
+    Boolean(options?.preferFastOffline),
+    onProgress
+  );
 
-  for (let i = 0; i < totalChunks; i++) {
-    const chunkText = chunks[i];
-    charsProcessed += chunkText.length;
-    const progressPercent = Math.min(95, Math.round(((i + 1) / totalChunks) * 100));
+  if (piperResult && piperResult.pcmArrays.length > 0) {
+    pcmSampleArrays = piperResult.pcmArrays;
+    sampleRate = piperResult.sampleRate;
+    engineLabel = `Piper Neural VITS (${piperResult.voiceId})`;
+  } else {
+    // 2. Reliable offline fallback: speakGenerator.js with bundled 'en/en-us' voice + 4-stage DSP mastering
+    const hasEngine = typeof win.generateSpeech === 'function';
+    if (!hasEngine) {
+      throw new Error('Speech synthesis engine could not be initialized in this browser.');
+    }
 
-    // Calculate estimated remaining seconds
-    const elapsedMs = Date.now() - startTime;
-    const avgMsPerChunk = elapsedMs / (i + 1);
-    const remainingChunks = totalChunks - (i + 1);
-    const estimatedRemainingSec = Math.max(0, Math.round((remainingChunks * avgMsPerChunk) / 1000));
+    // IMPORTANT: speakGenerator.js ONLY bundles 'en/en-us' ('en' causes exit(2) empty audio)
+    const voice = 'en/en-us';
+    const pitch = gender === 'female' ? 68 : 40;
+    const speed = 152;
+    const amplitude = 92;
+    const wordgap = 0;
 
-    const snippet = chunkText.slice(0, 45).replace(/\s+/g, ' ');
+    const pauseSamples = new Int16Array(Math.round(22050 * 0.12));
+    let charsProcessed = 0;
+    const startTime = Date.now();
 
-    onProgress?.({
-      status: 'synthesizing',
-      percent: progressPercent,
-      currentChunk: i + 1,
-      totalChunks,
-      statusText: `Synthesizing section ${i + 1} of ${totalChunks}: "${snippet}..."`,
-      charsProcessed,
-      totalChars,
-      estimatedRemainingSec,
-    });
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkText = chunks[i];
+      charsProcessed += chunkText.length;
+      const progressPercent = Math.min(95, Math.round(((i + 1) / totalChunks) * 100));
 
-    // Yield to browser UI thread so the progress bar animates smoothly
-    await new Promise((resolve) => setTimeout(resolve, 0));
+      const elapsedMs = Date.now() - startTime;
+      const avgMsPerChunk = elapsedMs / (i + 1);
+      const remainingChunks = totalChunks - (i + 1);
+      const estimatedRemainingSec = Math.max(0, Math.round((remainingChunks * avgMsPerChunk) / 1000));
+      const snippet = chunkText.slice(0, 45).replace(/\s+/g, ' ');
 
-    if (hasEngine) {
+      onProgress?.({
+        status: 'synthesizing',
+        percent: progressPercent,
+        currentChunk: i + 1,
+        totalChunks,
+        statusText: `Synthesizing section ${i + 1} of ${totalChunks}: "${snippet}..."`,
+        charsProcessed,
+        totalChars,
+        estimatedRemainingSec,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
       try {
         const wav = win.generateSpeech(chunkText, {
           voice,
@@ -396,19 +591,13 @@ export async function generateSpeechWavBytesAsync(
 
         if (wav && wav.length > 44) {
           const pcmBytes = wav.subarray(44);
-          // Create isolated 16-bit Int16Array copy of chunk samples
           const chunkSamples = new Int16Array(
             pcmBytes.buffer.slice(pcmBytes.byteOffset, pcmBytes.byteOffset + pcmBytes.byteLength)
           );
-
-          // Apply anti-click boundary fade to remove DC step pops
           applyAntiClickFade(chunkSamples, 320);
-
-          // Apply 4-stage DSP acoustic mastering: 100Hz HP + 3.1kHz notch + 2.2kHz presence + 7.5kHz LP + limiter
           const masteredSamples = masterVocalAcoustics(chunkSamples, 22050);
           pcmSampleArrays.push(masteredSamples);
 
-          // Add natural pause between sentences (except after the final section)
           if (i < totalChunks - 1) {
             pcmSampleArrays.push(pauseSamples);
           }
@@ -451,73 +640,62 @@ export async function generateSpeechWavBytesAsync(
     estimatedRemainingSec: 1,
   });
 
-  // Calculate total samples across all chunks and sentence pauses
   const totalSamples = pcmSampleArrays.reduce((sum, arr) => sum + arr.length, 0);
 
-  if (totalSamples > 0) {
-    const sampleRate = 22050;
-    const mergedSamples = new Int16Array(totalSamples);
-    let sampleOffset = 0;
-
-    for (const arr of pcmSampleArrays) {
-      mergedSamples.set(arr, sampleOffset);
-      sampleOffset += arr.length;
-    }
-
-    // 1. Build Lossless Studio WAV Master Blob (16-bit PCM RIFF)
-    const totalPcmBytes = totalSamples * 2;
-    const fullWav = new Uint8Array(44 + totalPcmBytes);
-    const view = new DataView(fullWav.buffer);
-
-    // RIFF Chunk
-    writeString(view, 0, 'RIFF');
-    view.setUint32(4, 36 + totalPcmBytes, true);
-    writeString(view, 8, 'WAVE');
-
-    // fmt Sub-chunk (PCM 16-bit Mono 22050Hz)
-    writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); // Linear PCM
-    view.setUint16(22, 1, true); // Mono (1 Channel)
-    view.setUint32(24, sampleRate, true); // 22050 Hz
-    view.setUint32(28, sampleRate * 2, true); // Byte rate (22050 * 1 * 2 = 44100 bytes/sec)
-    view.setUint16(32, 2, true); // Block align (1 * 2)
-    view.setUint16(34, 16, true); // Bits per sample (16-bit)
-
-    // data Sub-chunk
-    writeString(view, 36, 'data');
-    view.setUint32(40, totalPcmBytes, true);
-
-    // Copy raw bytes
-    const pcmUint8 = new Uint8Array(mergedSamples.buffer, mergedSamples.byteOffset, totalPcmBytes);
-    fullWav.set(pcmUint8, 44);
-
-    const duration = Math.max(1.0, totalSamples / sampleRate);
-    const masterWavBlob = new Blob([fullWav], { type: 'audio/wav' });
-
-    // 2. Encode to Genuine MPEG Layer-3 (MP3) Blob
-    const mp3Blob = encodePcmToMp3Blob(mergedSamples, sampleRate, 128);
-
-    onProgress?.({
-      status: 'completed',
-      percent: 100,
-      currentChunk: totalChunks,
-      totalChunks,
-      statusText: `Conversion complete! Clean audio duration: ${formatDuration(duration)}`,
-      charsProcessed: totalChars,
-      totalChars,
-      estimatedRemainingSec: 0,
-    });
-
-    return { blob: masterWavBlob, mp3Blob, duration };
+  if (totalSamples === 0) {
+    throw new Error('Speech synthesis produced empty audio samples. Please verify input text.');
   }
 
-  // Fallback safety
-  const wordCount = text.split(/\s+/).length;
-  const duration = Math.max(2, Math.round(wordCount * 0.42));
-  const pitchHz = gender === 'female' ? 220 : 135;
-  const fallbackBlob = createVocalPhoneticWavBlob(duration, pitchHz);
-  return { blob: fallbackBlob, mp3Blob: null, duration };
+  const mergedSamples = new Int16Array(totalSamples);
+  let sampleOffset = 0;
+
+  for (const arr of pcmSampleArrays) {
+    mergedSamples.set(arr, sampleOffset);
+    sampleOffset += arr.length;
+  }
+
+  // 1. Build Lossless Studio WAV Master Blob (16-bit PCM RIFF)
+  const totalPcmBytes = totalSamples * 2;
+  const fullWav = new Uint8Array(44 + totalPcmBytes);
+  const view = new DataView(fullWav.buffer);
+
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + totalPcmBytes, true);
+  writeString(view, 8, 'WAVE');
+
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // Linear PCM
+  view.setUint16(22, 1, true); // Mono (1 Channel)
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+
+  writeString(view, 36, 'data');
+  view.setUint32(40, totalPcmBytes, true);
+
+  const pcmUint8 = new Uint8Array(mergedSamples.buffer, mergedSamples.byteOffset, totalPcmBytes);
+  fullWav.set(pcmUint8, 44);
+
+  const duration = Math.max(1.0, totalSamples / sampleRate);
+  const masterWavBlob = new Blob([fullWav], { type: 'audio/wav' });
+
+  // 2. Encode to Genuine MPEG Layer-3 (MP3) Blob
+  const mp3Blob = encodePcmToMp3Blob(mergedSamples, sampleRate, 128);
+
+  onProgress?.({
+    status: 'completed',
+    percent: 100,
+    currentChunk: totalChunks,
+    totalChunks,
+    statusText: `Conversion complete! Clean audio duration: ${formatDuration(duration)}`,
+    charsProcessed: totalChars,
+    totalChars,
+    estimatedRemainingSec: 0,
+  });
+
+  return { blob: masterWavBlob, mp3Blob, duration, engineLabel, sampleRate };
 }
 
 function formatDuration(sec: number): string {
@@ -530,51 +708,6 @@ function writeString(view: DataView, offset: number, string: string): void {
   for (let i = 0; i < string.length; i++) {
     view.setUint8(offset + i, string.charCodeAt(i));
   }
-}
-
-function createVocalPhoneticWavBlob(durationSeconds: number, pitchHz: number): Blob {
-  const sampleRate = 44100;
-  const numSamples = Math.floor(sampleRate * Math.max(1, durationSeconds));
-  const buffer = new ArrayBuffer(44 + numSamples * 2);
-  const view = new DataView(buffer);
-
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + numSamples * 2, true);
-  writeString(view, 8, 'WAVE');
-
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-
-  writeString(view, 36, 'data');
-  view.setUint32(40, numSamples * 2, true);
-
-  const f0 = pitchHz;
-  const f1 = f0 * 3.2;
-  const f2 = f0 * 6.8;
-
-  for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
-    const syllableCadence = 0.6 + 0.4 * Math.sin(2 * Math.PI * 4.2 * t);
-    const fade = Math.min(1, Math.min(i / 1500, (numSamples - i) / 1500));
-
-    const sample =
-      (Math.sin(2 * Math.PI * f0 * t) * 0.45 +
-        Math.sin(2 * Math.PI * f1 * t) * 0.3 +
-        Math.sin(2 * Math.PI * f2 * t) * 0.15) *
-      syllableCadence *
-      fade;
-
-    const clamped = Math.max(-1, Math.min(1, sample));
-    view.setInt16(44 + i * 2, Math.floor(clamped * 32767), true);
-  }
-
-  return new Blob([buffer], { type: 'audio/wav' });
 }
 
 const FORMAT_SPECS: Record<
@@ -657,7 +790,7 @@ const FORMAT_SPECS: Record<
 
 /**
  * Asynchronously create a client-side AudioJob with clean speech audio content.
- * Links genuine MP3 blobs to MP3 formats and master WAV blobs to WAV formats.
+ * Uses Piper VITS neural speech when available (cached in OPFS), falling back cleanly to speakGenerator.js en/en-us.
  */
 export async function createStaticPagesJob(
   params: {
@@ -669,6 +802,7 @@ export async function createStaticPagesJob(
     speechStyle: string;
     title: string;
     formats: string[];
+    isAutoInit?: boolean;
   },
   onProgress?: (info: ConversionProgressInfo) => void
 ): Promise<AudioJob> {
@@ -676,11 +810,14 @@ export async function createStaticPagesJob(
   const jobId = `client_${Date.now()}`;
   const cleanTitle = (params.title || 'Kathir_Audio').trim().replace(/[^a-zA-Z0-9_\-]/g, '_') || 'Kathir_Audio';
 
-  // Synthesize clean spoken audio with acoustic filtering, anti-click smoothing & MP3 encoding
-  const { blob: wavBlob, mp3Blob, duration } = await generateSpeechWavBytesAsync(
+  const { blob: wavBlob, mp3Blob, duration, engineLabel, sampleRate } = await generateSpeechWavBytesAsync(
     params.text,
     params.gender,
-    onProgress
+    onProgress,
+    {
+      language: langCode,
+      preferFastOffline: Boolean(params.isAutoInit),
+    }
   );
 
   const wavBlobUrl = URL.createObjectURL(wavBlob);
@@ -705,7 +842,7 @@ export async function createStaticPagesJob(
       fileName: `${cleanTitle}.${spec.ext}`,
       mimeType: spec.mime,
       size: targetSize,
-      codec: spec.codec,
+      codec: key === 'wav' ? `Linear PCM 16-bit ${(sampleRate / 1000).toFixed(1)}kHz` : spec.codec,
       label: spec.label,
       category: spec.category,
       recommendedFor: spec.desc,
@@ -722,7 +859,7 @@ export async function createStaticPagesJob(
     gender: params.gender,
     language: langCode,
     languageName: params.languageName || params.language,
-    synthesizer: 'kathirStudio Voice Engine (4-Stage DSP Mastered)',
+    synthesizer: engineLabel,
     durationSeconds: duration,
     formats,
     zipDownloadUrl: mp3BlobUrl,
@@ -731,7 +868,6 @@ export async function createStaticPagesJob(
 
 /**
  * Bundle all selected audio formats and README into a real ZIP file in the browser using JSZip.
- * Embeds genuine MP3 files for .mp3 and master WAV files for .wav so decoders experience zero noise.
  */
 export async function generateClientZipBlob(job: AudioJob): Promise<Blob> {
   const zip = new JSZip();
@@ -746,7 +882,6 @@ Spoken Text: "${job.text.slice(0, 300)}${job.text.length > 300 ? '...' : ''}"
 Language Context: ${job.languageName || job.language}
 Voice Character: ${job.gender === 'female' ? 'Female 👩 (Studio Clear)' : 'Male 👨 (Deep Resonant)'} (${job.voice})
 Speech Engine: ${job.synthesizer}
-Acoustic Processing: 4-Stage DSP Filter (100Hz HP + 3.1kHz Notch + 2.2kHz Presence EQ + 7.5kHz LP + Anti-Click Cross-Fade)
 Duration: ${formatDuration(job.durationSeconds)} (${job.durationSeconds.toFixed(1)}s)
 Created: ${new Date().toLocaleString()}
 
@@ -755,14 +890,14 @@ INCLUDED AUDIO FORMATS (${job.formats.length} TOTAL):
 ${formatList}
 
 Usage Notes:
-- .mp3: Real MPEG-1 Layer 3 audio stream (128 kbps) encoded via LAME - play on all devices with zero noise.
-- .wav: Studio master uncompressed linear 16-bit PCM (lossless reference).
-- .m4a / .m4r / .aiff / .caf: Apple iPhone & macOS compatible formats.
+- .mp3: Real MPEG Layer-3 audio stream encoded via LAME for universal compatibility.
+- .wav: Uncompressed linear 16-bit PCM studio reference.
 - Converted directly with kathirStudio Universal Text to Audio Format Converter.
 `;
 
   zip.file('README.txt', readme);
 
+  let fallbackAudio: { blob: Blob; mp3Blob: Blob | null } | null = null;
   for (const fmt of job.formats) {
     if (fmt.downloadUrl && fmt.downloadUrl.startsWith('blob:')) {
       try {
@@ -771,12 +906,19 @@ Usage Notes:
         zip.file(fmt.fileName, blob);
         continue;
       } catch {
-        // fallback
+        // fallback below
       }
     }
-    // Fallback: generate clean wav
-    const result = await generateSpeechWavBytesAsync(job.text, job.gender);
-    zip.file(fmt.fileName, result.mp3Blob && fmt.format === 'mp3' ? result.mp3Blob : result.blob);
+    if (!fallbackAudio) {
+      const result = await generateSpeechWavBytesAsync(job.text, job.gender, undefined, {
+        language: job.language,
+      });
+      fallbackAudio = { blob: result.blob, mp3Blob: result.mp3Blob };
+    }
+    zip.file(
+      fmt.fileName,
+      fallbackAudio.mp3Blob && fmt.format === 'mp3' ? fallbackAudio.mp3Blob : fallbackAudio.blob
+    );
   }
 
   return zip.generateAsync({ type: 'blob' });
