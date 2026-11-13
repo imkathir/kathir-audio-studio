@@ -8,19 +8,19 @@ import {
 import { AudioJob, FormatItem, ConversionProgressInfo } from '../types';
 
 const PIPER_VOICE_MAP: Record<string, { female: VoiceId; male: VoiceId }> = {
-  en: { female: 'en_US-amy-low', male: 'en_US-ryan-low' },
-  es: { female: 'es_ES-mls_9972-low', male: 'es_ES-carlfm-x_low' },
-  fr: { female: 'fr_FR-siwis-low', male: 'fr_FR-gilles-low' },
-  de: { female: 'de_DE-kerstin-low', male: 'de_DE-thorsten-low' },
+  en: { female: 'en_US-hfc_female-medium', male: 'en_US-ryan-medium' },
+  es: { female: 'es_ES-davefx-medium', male: 'es_ES-carlfm-x_low' },
+  fr: { female: 'fr_FR-siwis-medium', male: 'fr_FR-tom-medium' },
+  de: { female: 'de_DE-kerstin-low', male: 'de_DE-thorsten-medium' },
   it: { female: 'it_IT-paola-medium', male: 'it_IT-riccardo-x_low' },
   pt: { female: 'pt_BR-faber-medium', male: 'pt_BR-edresson-low' },
   nl: { female: 'nl_NL-mls_5809-low', male: 'nl_NL-mls_7432-low' },
   ru: { female: 'ru_RU-irina-medium', male: 'ru_RU-dmitri-medium' },
-  ar: { female: 'ar_JO-kareem-low', male: 'ar_JO-kareem-low' },
-  zh: { female: 'zh_CN-huayan-x_low', male: 'zh_CN-huayan-x_low' },
+  ar: { female: 'ar_JO-kareem-medium', male: 'ar_JO-kareem-medium' },
+  zh: { female: 'zh_CN-huayan-medium', male: 'zh_CN-huayan-medium' },
   tr: { female: 'tr_TR-dfki-medium', male: 'tr_TR-fahrettin-medium' },
-  vi: { female: 'vi_VN-vivos-x_low', male: 'vi_VN-25hours_single-low' },
-  uk: { female: 'uk_UA-lada-x_low', male: 'uk_UA-lada-x_low' },
+  vi: { female: 'vi_VN-vais1000-medium', male: 'vi_VN-25hours_single-low' },
+  uk: { female: 'uk_UA-ukrainian_tts-medium', male: 'uk_UA-ukrainian_tts-medium' },
 };
 
 /**
@@ -80,6 +80,8 @@ export function sanitizeForSpeech(input: string): string {
     .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    // Split camelCase identifiers cleanly (e.g. kathirStudio -> kathir Studio)
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
     .replace(/[—–]/g, ', ')
     .replace(/&amp;/g, ' and ')
     .replace(/&/g, ' and ')
@@ -369,7 +371,6 @@ async function synthesizeWithPiperNeural(
   langCode: string,
   gender: 'female' | 'male',
   totalChars: number,
-  preferFastOffline: boolean,
   onProgress?: (info: ConversionProgressInfo) => void
 ): Promise<{
   pcmArrays: Int16Array[];
@@ -381,30 +382,26 @@ async function synthesizeWithPiperNeural(
 
   const voiceId: VoiceId = gender === 'male' ? voicePair.male : voicePair.female;
 
-  // On initial background welcome load, only use Piper if the neural voice is already cached in OPFS
-  if (preferFastOffline) {
-    try {
-      const cached = await getStoredPiperVoices();
-      if (!cached.includes(voiceId)) {
-        return null;
-      }
-    } catch {
-      return null;
-    }
-  }
-
   try {
     const totalChunks = chunks.length;
     if (TtsSession._instance && TtsSession._instance.voiceId !== voiceId) {
       TtsSession._instance = null;
     }
 
+    let isAlreadyCached = false;
+    try {
+      const cached = await getStoredPiperVoices();
+      isAlreadyCached = cached.includes(voiceId);
+    } catch {}
+
     onProgress?.({
       status: 'analyzing',
       percent: 5,
       currentChunk: 0,
       totalChunks,
-      statusText: `Loading Neural Voice (${voiceId})...`,
+      statusText: isAlreadyCached
+        ? `Loading cached Neural Voice (${voiceId})...`
+        : `Initializing Neural Voice (${voiceId})...`,
       charsProcessed: 0,
       totalChars,
     });
@@ -420,7 +417,7 @@ async function synthesizeWithPiperNeural(
             percent: Math.min(20, Math.max(4, Math.round(dlPct * 0.2))),
             currentChunk: 0,
             totalChunks,
-            statusText: `Downloading Neural Voice model (${dlPct}% · cached offline after first run)...`,
+            statusText: `Downloading Studio Neural Voice (${dlPct}% · cached offline after first run)...`,
             charsProcessed: 0,
             totalChars,
           });
@@ -429,8 +426,8 @@ async function synthesizeWithPiperNeural(
     });
 
     const pcmArrays: Int16Array[] = [];
-    let detectedSampleRate = 16000;
-    let pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.14));
+    let detectedSampleRate = 22050;
+    let pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.16));
     let charsProcessed = 0;
     const startTime = Date.now();
 
@@ -465,12 +462,12 @@ async function synthesizeWithPiperNeural(
         const chunkRate = wavView.getUint32(24, true);
         if (chunkRate >= 8000 && chunkRate <= 48000 && i === 0) {
           detectedSampleRate = chunkRate;
-          pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.14));
+          pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.16));
         }
 
         const pcmByteLen = wavBuf.byteLength - 44;
         const chunkSamples = new Int16Array(wavBuf.slice(44, 44 + pcmByteLen - (pcmByteLen % 2)));
-        applyAntiClickFade(chunkSamples, 220);
+        applyAntiClickFade(chunkSamples, 180);
         const mastered = masterNeuralAcoustics(chunkSamples, detectedSampleRate);
         pcmArrays.push(mastered);
 
@@ -499,7 +496,7 @@ export async function generateSpeechWavBytesAsync(
   text: string,
   gender: 'female' | 'male' = 'female',
   onProgress?: (info: ConversionProgressInfo) => void,
-  options?: { language?: string; preferFastOffline?: boolean }
+  options?: { language?: string }
 ): Promise<{ blob: Blob; mp3Blob: Blob | null; duration: number; engineLabel: string; sampleRate: number }> {
   const chunks = splitTextIntoSentenceChunks(text, 320);
   const totalChunks = chunks.length;
@@ -530,7 +527,6 @@ export async function generateSpeechWavBytesAsync(
     langCode,
     gender,
     totalChars,
-    Boolean(options?.preferFastOffline),
     onProgress
   );
 
@@ -547,10 +543,10 @@ export async function generateSpeechWavBytesAsync(
 
     // IMPORTANT: speakGenerator.js ONLY bundles 'en/en-us' ('en' causes exit(2) empty audio)
     const voice = 'en/en-us';
-    const pitch = gender === 'female' ? 68 : 40;
-    const speed = 152;
+    const pitch = gender === 'female' ? 66 : 40;
+    const speed = 138;
     const amplitude = 92;
-    const wordgap = 0;
+    const wordgap = 1;
 
     const pauseSamples = new Int16Array(Math.round(22050 * 0.12));
     let charsProcessed = 0;
@@ -640,11 +636,16 @@ export async function generateSpeechWavBytesAsync(
     estimatedRemainingSec: 1,
   });
 
-  const totalSamples = pcmSampleArrays.reduce((sum, arr) => sum + arr.length, 0);
+  const rawSamples = pcmSampleArrays.reduce((sum, arr) => sum + arr.length, 0);
 
-  if (totalSamples === 0) {
+  if (rawSamples === 0) {
     throw new Error('Speech synthesis produced empty audio samples. Please verify input text.');
   }
+
+  // Append 250ms trailing silence so MP3 encoder frame padding never clips the final syllable
+  const tailSilence = new Int16Array(Math.round(sampleRate * 0.25));
+  pcmSampleArrays.push(tailSilence);
+  const totalSamples = rawSamples + tailSilence.length;
 
   const mergedSamples = new Int16Array(totalSamples);
   let sampleOffset = 0;
@@ -816,7 +817,6 @@ export async function createStaticPagesJob(
     onProgress,
     {
       language: langCode,
-      preferFastOffline: Boolean(params.isAutoInit),
     }
   );
 

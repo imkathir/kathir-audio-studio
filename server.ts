@@ -386,12 +386,23 @@ function splitIntoParagraphChunks(text: string, maxChunkLength = 3500): string[]
 function sanitizeForGoogleTTS(input: string): string {
   if (!input) return '';
   return input
+    .replace(/https?:\/\/([^\s/$.?#].[^\s]*)/gi, (_match, p1) => {
+      try {
+        const parts = p1.split('/');
+        const host = parts[0].replace(/\./g, ' dot ').replace(/-/g, ' ');
+        const pathPart = parts.slice(1).join(' ').replace(/[?&=_.-]/g, ' ');
+        return `${host} ${pathPart}`;
+      } catch {
+        return 'web address';
+      }
+    })
     .replace(/\$\s*\\to\s*\$/g, ' to ')
     .replace(/->|→|⇒/g, ' to ')
     .replace(/#{1,6}\s+/g, '')
     .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
     .replace(/[—–]/g, ', ')
     .replace(/[|{}[\]<>]/g, ' ')
     .replace(/\s+/g, ' ')
