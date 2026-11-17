@@ -93,12 +93,14 @@ export default function App() {
       totalChars: params.text.length,
     });
 
-    const isGitHubPages = window.location.hostname.includes('github.io');
+    const isStaticHost =
+      window.location.hostname.includes('github.io') ||
+      window.location.hostname.includes('vercel.app');
     const customBackend = localStorage.getItem('kathir_tts_backend_url') || '';
     const baseBackend = customBackend ? customBackend.replace(/\/+$/, '') : '';
 
-    // On GitHub Pages (or static hosting without custom backend), execute the client-side neural engine
-    if (isGitHubPages && !customBackend) {
+    // On GitHub Pages / Vercel (or static hosting without custom backend), execute the client-side neural engine
+    if (isStaticHost && !customBackend) {
       try {
         const clientJob = await createStaticPagesJob(params, (info) => {
           setProgressInfo(info);

@@ -104,10 +104,13 @@ export const FormatResultsGrid: React.FC<FormatResultsGridProps> = ({
     const zipFilename = `kathirStudio_${safeJobId}_All_Formats.zip`;
 
     try {
-      const isGitHubPages = typeof window !== 'undefined' && window.location.hostname.includes('github.io');
+      const isStaticHost =
+        typeof window !== 'undefined' &&
+        (window.location.hostname.includes('github.io') ||
+          window.location.hostname.includes('vercel.app'));
 
-      // On GitHub Pages or when zipDownloadUrl is a blob or points to client, bundle client-side with JSZip
-      if (isGitHubPages || !job.zipDownloadUrl || job.zipDownloadUrl.startsWith('blob:')) {
+      // On GitHub Pages / Vercel or when zipDownloadUrl is a blob or points to client, bundle client-side with JSZip
+      if (isStaticHost || !job.zipDownloadUrl || job.zipDownloadUrl.startsWith('blob:')) {
         const zipBlob = await generateClientZipBlob(job);
         const blobUrl = window.URL.createObjectURL(zipBlob);
         const link = document.createElement('a');
