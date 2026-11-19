@@ -346,7 +346,8 @@ export const SupportSection: React.FC<SupportSectionProps> = ({ sectionRef }) =>
                 type="button"
                 onClick={handleDonate}
                 disabled={busy || !configured}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--accent-gradient)] px-5 py-3 text-sm font-bold text-white transition-all hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 shadow-sm shadow-[var(--accent-primary)]/25"
+                style={{ backgroundImage: 'var(--accent-gradient)' }}
+                className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold text-white shadow-md shadow-[var(--accent-primary)]/30 transition-all hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {busy ? (
                   <>
