@@ -7,12 +7,19 @@
  *
  * The key secret is only ever read from server-side environment variables and is
  * never referenced from anything under /src, so it can never reach the browser bundle.
+ *
+ * Order creation uses the official `razorpay` SDK when it can be loaded, and falls
+ * back to a plain REST call against https://api.razorpay.com/v1/orders otherwise.
+ * The fallback matters on Vercel: the SDK is CommonJS and its axios dependency calls
+ * `require('util')`, which throws "Dynamic require of 'util' is not supported" when the
+ * serverless function is bundled as ESM.
  */
 import crypto from 'crypto';
-import Razorpay from 'razorpay';
 import { isSupportedCurrency, MIN_ORDER_AMOUNT } from './shared/currency';
 
 export { MIN_ORDER_AMOUNT };
+
+const RAZORPAY_ORDERS_API = 'https://api.razorpay.com/v1/orders';
 
 export interface RazorpayCredentials {
   keyId: string;
@@ -63,7 +70,58 @@ function buildReceipt(): string {
 }
 
 /**
- * Creates a Razorpay order through the official SDK.
+ * Loads the CommonJS `razorpay` SDK lazily.
+ * Returns null when the SDK cannot be evaluated in the current runtime/bundler.
+ */
+async function loadRazorpaySdk(): Promise<any | null> {
+  try {
+    const mod: any = await import('razorpay');
+    const Razorpay = mod?.default ?? mod;
+    return typeof Razorpay === 'function' ? Razorpay : null;
+  } catch (err: any) {
+    console.warn('[razorpay] SDK unavailable, using the REST fallback:', err?.message);
+    return null;
+  }
+}
+
+/** Creates the order through the Razorpay REST API. */
+async function createOrderViaRest(
+  keyId: string,
+  keySecret: string,
+  payload: Record<string, unknown>
+): Promise<CreatedOrder> {
+  const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+
+  const response = await fetch(RAZORPAY_ORDERS_API, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Basic ${auth}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data: any = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(
+      data?.error?.description ||
+        data?.message ||
+        `Razorpay order creation failed (HTTP ${response.status}).`
+    ) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
+
+  if (!data?.id) {
+    throw new Error('Razorpay did not return an order id.');
+  }
+
+  return { orderId: data.id, amount: data.amount, currency: data.currency };
+}
+
+/**
+ * Creates a Razorpay order.
  * Throws an Error carrying a human readable message on validation or upstream failure.
  */
 export async function createRazorpayOrder(input: CreateOrderInput): Promise<CreatedOrder> {
@@ -96,33 +154,28 @@ export async function createRazorpayOrder(input: CreateOrderInput): Promise<Crea
   if (input.supporterName) notes.supporter_name = input.supporterName.slice(0, 100);
   if (input.supporterMessage) notes.supporter_message = input.supporterMessage.slice(0, 200);
 
-  const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
+  const payload = {
+    amount,
+    currency,
+    receipt: buildReceipt(),
+    notes,
+    payment_capture: 1,
+  };
 
+  // 1) Preferred path: the official SDK.
   try {
-    const order = await razorpay.orders.create({
-      amount,
-      currency,
-      receipt: buildReceipt(),
-      notes,
-      payment_capture: 1,
-    });
-
-    return {
-      orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
-    };
+    const Razorpay = await loadRazorpaySdk();
+    if (Razorpay) {
+      const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
+      const order = await razorpay.orders.create(payload);
+      return { orderId: order.id, amount: order.amount, currency: order.currency };
+    }
   } catch (err: any) {
-    const message =
-      err?.error?.description ||
-      err?.response?.data?.error?.description ||
-      err?.message ||
-      'Razorpay order creation failed.';
-    const status = err?.statusCode || err?.response?.statusCode;
-    const wrapped = new Error(message) as Error & { status?: number };
-    if (status) wrapped.status = status;
-    throw wrapped;
+    console.warn('[razorpay] SDK order creation failed, using the REST fallback:', err?.message);
   }
+
+  // 2) Fallback path: the Razorpay REST API.
+  return createOrderViaRest(keyId, keySecret, payload);
 }
 
 /** Constant-time string comparison that never throws on length mismatch. */
