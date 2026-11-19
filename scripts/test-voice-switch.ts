@@ -40,11 +40,16 @@ await act(async () => {
   );
 });
 
-const doc = dom.window.document;
+const doc = dom.window.document as unknown as Document;
 const textarea = () => doc.querySelector('#tts-text') as HTMLTextAreaElement;
 const voiceSelect = () => doc.querySelector('#voice-select') as HTMLSelectElement;
-const buttonByText = (label: string) =>
-  Array.from(doc.querySelectorAll('button')).find((b) => b.textContent?.includes(label))!;
+const buttonByText = (label: string): Element => {
+  const found = Array.from(doc.querySelectorAll('button')).find((b) =>
+    b.textContent?.includes(label)
+  );
+  if (!found) throw new Error(`Button not found: ${label}`);
+  return found;
+};
 
 function typeText(value: string) {
   const el = textarea();
@@ -119,7 +124,7 @@ check('voice dropdown keeps the user text', textarea().value === myText);
 
 // --- 8. the notice explains what happened --------------------------------------
 const notice = Array.from(doc.querySelectorAll('div')).some((d) =>
-  d.textContent?.includes('Your text was kept')
+  (d as HTMLElement).textContent?.includes('Your text was kept')
 );
 check('notice explains that the text was kept', notice);
 
