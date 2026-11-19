@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Volume2,
   Sliders,
@@ -14,6 +14,7 @@ import {
   Smartphone,
   Disc,
   AlertCircle,
+  Info,
 } from 'lucide-react';
 import { PresetTemplate, FormatOption, ConversionProgressInfo } from '../types';
 import { SUPPORTED_LANGUAGES, detectLanguage } from '../utils/language';
@@ -117,6 +118,10 @@ interface AudioInputPanelProps {
   progressInfo?: ConversionProgressInfo | null;
 }
 
+const DEFAULT_SAMPLE_TEXT =
+  'Welcome to Kathir Text to Speech Studio. Convert any text into crystal clear audio files instantly.';
+const DEFAULT_SAMPLE_TITLE = 'Kathir_Speech';
+
 const PRESETS: PresetTemplate[] = [
   {
     id: 'ta-male',
@@ -192,12 +197,10 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
   conversionProgress,
   progressInfo,
 }) => {
-  const [text, setText] = useState<string>(
-    'Welcome to Kathir Text to Speech Studio. Convert any text into crystal clear audio files instantly.'
-  );
+  const [text, setText] = useState<string>(DEFAULT_SAMPLE_TEXT);
   const [selectedLanguage, setSelectedLanguage] = useState<string>('auto');
   const [gender, setGender] = useState<'female' | 'male'>('female');
-  const [title, setTitle] = useState<string>('Kathir_Speech');
+  const [title, setTitle] = useState<string>(DEFAULT_SAMPLE_TITLE);
   const [voice, setVoice] = useState<string>('Kore');
   const [speechStyle, setSpeechStyle] = useState<string>('Clear, natural studio voice');
   const [sampleRate, setSampleRate] = useState<number>(44100);
@@ -205,6 +208,27 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [showEngineInfo, setShowEngineInfo] = useState<boolean>(false);
   const [isBrowserSpeaking, setIsBrowserSpeaking] = useState<boolean>(false);
+  const [presetNotice, setPresetNotice] = useState<string>('');
+
+  // Tracks the text/title the app filled in by itself (the default sample or the last
+  // preset). Anything else is treated as content the user wrote and is never overwritten
+  // when they switch the voice model / language.
+  const autoTextRef = useRef<string>(DEFAULT_SAMPLE_TEXT);
+  const autoTitleRef = useRef<string>(DEFAULT_SAMPLE_TITLE);
+
+  // Remembers the voice picked for each gender so flipping Female/Male and back
+  // restores the previous choice instead of resetting it.
+  const voiceByGenderRef = useRef<{ female: string; male: string }>({
+    female: 'Kore',
+    male: 'Charon',
+  });
+
+  // Auto-hide the "text kept" notice
+  useEffect(() => {
+    if (!presetNotice) return;
+    const timer = setTimeout(() => setPresetNotice(''), 5000);
+    return () => clearTimeout(timer);
+  }, [presetNotice]);
 
   // User-selected formats to convert (defaults to popular: MP3 and M4A iPhone)
   const [selectedFormats, setSelectedFormats] = useState<string[]>(['mp3', 'm4a']);
@@ -281,13 +305,52 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
     return `~${mins}m ${secs > 0 ? `${secs}s` : ''}`;
   };
 
+  /**
+   * Switching the language / voice model must never throw away what the user wrote.
+   * The sample text is only swapped in while the textarea still holds the app's own
+   * sample text (the default one or the last preset); once the user types their own
+   * content it is kept and only the voice settings change.
+   */
   const handleApplyPreset = (preset: PresetTemplate) => {
-    setText(preset.text);
-    setSelectedLanguage(preset.language);
+    const textIsAuto = text === autoTextRef.current;
+    const titleIsAuto = title === autoTitleRef.current;
+
+    if (textIsAuto) {
+      autoTextRef.current = preset.text;
+      setText(preset.text);
+      setSelectedLanguage(preset.language);
+    }
+
+    if (titleIsAuto) {
+      const nextTitle = `${preset.label.replace(/[^a-zA-Z0-9]/g, '_')}_Audio`;
+      autoTitleRef.current = nextTitle;
+      setTitle(nextTitle);
+    }
+
     setGender(preset.gender);
-    setTitle(`${preset.label.replace(/[^a-zA-Z0-9]/g, '_')}_Audio`);
+    voiceByGenderRef.current[preset.gender] = preset.voice;
     setVoice(preset.voice);
     setSpeechStyle(preset.speechStyle);
+
+    setPresetNotice(
+      textIsAuto
+        ? `${preset.label} loaded - sample text, language and voice model applied.`
+        : 'Your text was kept - only the voice model changed.'
+    );
+  };
+
+  /** Switches the voice character while remembering the voice picked for each gender. */
+  const handleSelectGender = (next: 'female' | 'male') => {
+    if (next === gender) return;
+    voiceByGenderRef.current[gender] = voice;
+    setGender(next);
+    setVoice(voiceByGenderRef.current[next]);
+  };
+
+  /** Picks a voice model directly - the text content is left untouched. */
+  const handleSelectVoice = (next: string) => {
+    voiceByGenderRef.current[gender] = next;
+    setVoice(next);
   };
 
   const handleConvert = (e: React.FormEvent) => {
@@ -427,12 +490,18 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
 
       {/* Preset Buttons */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-[var(--text-muted)] mr-1">Sample Languages:</span>
+        <span
+          className="text-xs font-medium text-[var(--text-muted)] mr-1"
+          title="Switches the language and voice model. Text you typed yourself is always kept."
+        >
+          Sample Languages:
+        </span>
         {PRESETS.map((preset) => (
           <button
             key={preset.id}
             type="button"
             onClick={() => handleApplyPreset(preset)}
+            title={`Switch to ${preset.label} - your own text is never overwritten`}
             className="flex items-center gap-1.5 rounded-md border border-[var(--border-color)] bg-[var(--bg-input)] px-2.5 py-1 text-xs text-[var(--text-primary)] transition-all hover:border-[var(--accent-primary)] hover:bg-[var(--accent-subtle)]"
           >
             <span>{preset.flag}</span>
@@ -441,6 +510,14 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
           </button>
         ))}
       </div>
+
+      {/* Notice explaining what the last model switch did */}
+      {presetNotice && (
+        <div className="mb-4 flex items-center gap-1.5 rounded-lg border border-[var(--border-color)] bg-[var(--bg-input)] px-3 py-2 text-[11px] text-[var(--text-muted)]">
+          <Info className="h-3.5 w-3.5 shrink-0 text-[var(--accent-primary)]" />
+          <span>{presetNotice}</span>
+        </div>
+      )}
 
       <form onSubmit={handleConvert} className="space-y-4">
         {/* Text Area */}
@@ -515,10 +592,7 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
             <div className="flex rounded-lg border border-[var(--border-color)] bg-[var(--bg-input)] p-1">
               <button
                 type="button"
-                onClick={() => {
-                  setGender('female');
-                  setVoice('Kore');
-                }}
+                onClick={() => handleSelectGender('female')}
                 className={`flex flex-1 items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-semibold transition-all ${
                   gender === 'female'
                     ? 'bg-[var(--accent-primary)] text-white shadow-sm'
@@ -530,10 +604,7 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setGender('male');
-                  setVoice('Charon');
-                }}
+                onClick={() => handleSelectGender('male')}
                 className={`flex flex-1 items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-semibold transition-all ${
                   gender === 'male'
                     ? 'bg-[var(--accent-primary)] text-white shadow-sm'
@@ -569,7 +640,7 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
             <select
               id="voice-select"
               value={voice}
-              onChange={(e) => setVoice(e.target.value)}
+              onChange={(e) => handleSelectVoice(e.target.value)}
               className="w-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-input)] px-3 py-2 text-xs text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-primary)]"
             >
               {gender === 'female' ? (
