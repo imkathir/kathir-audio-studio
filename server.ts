@@ -8,6 +8,13 @@ import util from 'util';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import 'dotenv/config';
+import {
+  createRazorpayOrder,
+  isRazorpayConfigured,
+  MIN_ORDER_AMOUNT,
+  verifyRazorpaySignature,
+} from './razorpay-api';
 
 const execPromise = util.promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -599,6 +606,103 @@ app.get('/api/health', (_req, res) => {
     formats: Object.keys(FORMAT_SPECS),
     appleFormats: ['m4a', 'm4r', 'aiff', 'caf'],
     timestamp: Date.now(),
+  });
+});
+
+// Razorpay Standard Checkout - create order
+// Mirrors /api/create-order (Vercel serverless function) for the local Express backend.
+app.post('/api/create-order', async (req, res) => {
+  if (!isRazorpayConfigured()) {
+    res.status(500).json({
+      success: false,
+      error: 'Razorpay is not configured on the server (missing RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET).',
+    });
+    return;
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const amount = Number(body.amount);
+  const currency = String(body.currency || 'INR').toUpperCase();
+
+  if (!Number.isFinite(amount) || !Number.isInteger(amount) || amount <= 0) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid amount. Send a positive whole number in the minor unit of the currency.',
+    });
+    return;
+  }
+
+  if (amount < MIN_ORDER_AMOUNT) {
+    res.status(400).json({
+      success: false,
+      error: `Minimum order amount is ${MIN_ORDER_AMOUNT} (e.g. 100 paise = ₹1).`,
+    });
+    return;
+  }
+
+  try {
+    const order = await createRazorpayOrder({
+      amount,
+      currency,
+      supporterName: typeof body.name === 'string' ? body.name : undefined,
+      supporterMessage: typeof body.message === 'string' ? body.message : undefined,
+    });
+    res.json({
+      success: true,
+      order_id: order.orderId,
+      amount: order.amount,
+      currency: order.currency,
+    });
+  } catch (err: any) {
+    const status = typeof err?.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 502;
+    res.status(status).json({
+      success: false,
+      error: err?.message || 'Could not create the Razorpay order.',
+    });
+  }
+});
+
+// Razorpay Standard Checkout - verify payment signature
+// Mirrors /api/verify-payment (Vercel serverless function) for the local Express backend.
+app.post('/api/verify-payment', (req, res) => {
+  if (!isRazorpayConfigured()) {
+    res.status(500).json({
+      success: false,
+      error: 'Razorpay is not configured on the server (missing RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET).',
+    });
+    return;
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const orderId = String(body.razorpay_order_id || '');
+  const paymentId = String(body.razorpay_payment_id || '');
+  const signature = String(body.razorpay_signature || '');
+
+  if (!orderId || !paymentId || !signature) {
+    res.status(400).json({
+      success: false,
+      verified: false,
+      error: 'Missing razorpay_order_id, razorpay_payment_id or razorpay_signature.',
+    });
+    return;
+  }
+
+  const verified = verifyRazorpaySignature({ orderId, paymentId, signature });
+
+  if (!verified) {
+    res.status(400).json({
+      success: false,
+      verified: false,
+      error: 'Payment signature verification failed. The payment was not accepted.',
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    verified: true,
+    order_id: orderId,
+    payment_id: paymentId,
   });
 });
 

@@ -1,11 +1,12 @@
 import React from 'react';
-import { Sparkles, Palette, Check } from 'lucide-react';
+import { Sparkles, Palette, Check, Coffee } from 'lucide-react';
 import { ColorTheme } from '../types';
 import { Logo } from './Logo';
 
 interface TopBarProps {
   onScrollToFormats: () => void;
   onScrollToStudio: () => void;
+  onScrollToSupport: () => void;
   currentTheme: ColorTheme;
   onSelectTheme: (theme: ColorTheme) => void;
 }
@@ -22,6 +23,7 @@ const THEMES: Array<{ id: ColorTheme; name: string; color: string; border: strin
 export const TopBar: React.FC<TopBarProps> = ({
   onScrollToFormats,
   onScrollToStudio,
+  onScrollToSupport,
   currentTheme,
   onSelectTheme,
 }) => {
@@ -64,6 +66,14 @@ export const TopBar: React.FC<TopBarProps> = ({
             >
               Audio Formats
             </button>
+            <button
+              onClick={onScrollToSupport}
+              className="flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 text-[var(--text-muted)] hover:text-[var(--accent-primary)]"
+              title="Buy me a coffee"
+            >
+              <Coffee className="h-3.5 w-3.5" />
+              <span>Buy me a coffee</span>
+            </button>
           </nav>
 
           {/* Theme Palette Bar */}
@@ -92,6 +102,14 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         {/* Zone 3: Primary Action */}
         <div className="flex items-center gap-3 shrink-0">
+          <button
+            onClick={onScrollToSupport}
+            title="Buy me a coffee"
+            aria-label="Buy me a coffee - support the project"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border-color)] bg-[var(--bg-surface)] text-[var(--accent-primary)] transition-all hover:brightness-110 hover:border-[var(--accent-primary)] active:scale-95 shrink-0"
+          >
+            <Coffee className="h-4 w-4" />
+          </button>
           <button
             onClick={onScrollToStudio}
             className="flex items-center gap-2 rounded-lg bg-[var(--accent-primary)] px-4 py-2 text-xs font-semibold text-white transition-all hover:brightness-110 active:scale-98 whitespace-nowrap shrink-0 shadow-sm shadow-[var(--accent-primary)]/25"

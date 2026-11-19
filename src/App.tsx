@@ -3,6 +3,7 @@ import { TopBar } from './components/TopBar';
 import { AudioInputPanel } from './components/AudioInputPanel';
 import { WaveformPlayer } from './components/WaveformPlayer';
 import { FormatResultsGrid } from './components/FormatResultsGrid';
+import { SupportSection } from './components/SupportSection';
 import { audioService } from './services/audio-service';
 import { AudioJob, FormatItem, ColorTheme, ConversionProgressInfo } from './types';
 import { Volume2, Sparkles, CheckCircle2, ShieldCheck, Music2, Apple, Smartphone, Info } from 'lucide-react';
@@ -30,6 +31,7 @@ export default function App() {
 
   const formatsRef = useRef<HTMLDivElement | null>(null);
   const studioRef = useRef<HTMLDivElement | null>(null);
+  const supportRef = useRef<HTMLDivElement | null>(null);
 
   // Sync theme to root element and localStorage
   useEffect(() => {
@@ -224,12 +226,17 @@ export default function App() {
     studioRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  const scrollToSupport = () => {
+    supportRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <div className="min-h-screen bg-[var(--bg-main)] text-[var(--text-primary)] flex flex-col font-sans selection:bg-[var(--accent-primary)]/30 selection:text-white transition-colors duration-200">
       {/* Top Bar with Brand and Color Theme Switcher */}
       <TopBar
         onScrollToFormats={scrollToFormats}
         onScrollToStudio={scrollToStudio}
+        onScrollToSupport={scrollToSupport}
         currentTheme={theme}
         onSelectTheme={setTheme}
       />
@@ -354,6 +361,9 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          {/* Buy me a coffee - support section */}
+          <SupportSection sectionRef={(el) => { supportRef.current = el; }} />
         </div>
       </main>
 

@@ -30,7 +30,57 @@
 
 ## 🚀 Live Demo
 
+- **Vercel (current)**: [https://kathir-audio-studio.vercel.app](https://kathir-audio-studio.vercel.app)
 - **GitHub Pages**: [https://imkathir.github.io/kathir-tts-studio/](https://imkathir.github.io/kathir-tts-studio/)
+
+---
+
+## ☕ Buy me a coffee (Razorpay Standard Checkout)
+
+The app ships with a "Buy me a coffee" section at the bottom of the page. The top bar has a
+coffee-cup button and a "Buy me a coffee" link that smooth-scrolls down to it, where the
+supporter picks an amount in their own currency (INR, USD, EUR, GBP, AUD, CAD, SGD, AED, JPY, ZAR)
+and pays through the Razorpay Standard Checkout modal.
+
+### How it works
+
+| Step | Where | What happens |
+| --- | --- | --- |
+| 1. Create order | `POST /api/create-order` | The server creates a Razorpay order (`amount` in minor units, `currency`, unique `receipt`). Returns `{ order_id, amount, currency }`. Minimum order amount is `100` minor units (100 paise = ₹1). |
+| 2. Checkout | Browser | `https://checkout.razorpay.com/v1/checkout.js` opens the modal with the `order_id`. On success the browser receives `razorpay_payment_id`, `razorpay_order_id` and `razorpay_signature`. |
+| 3. Verify | `POST /api/verify-payment` | The server recomputes `HMAC-SHA256(order_id + "|" + payment_id, KEY_SECRET)` and compares it with `razorpay_signature`. The payment is only accepted when the signatures match (constant-time comparison). |
+
+### Environment variables
+
+`.env` is git-ignored - never commit the key secret.
+
+```bash
+# Server-side only (never sent to the browser)
+RAZORPAY_KEY_ID=rzp_test_XXXXXXXXXXXX
+RAZORPAY_KEY_SECRET=your_key_secret
+
+# Public key id, inlined into the browser bundle by Vite
+VITE_RAZORPAY_KEY_ID=rzp_test_XXXXXXXXXXXX
+```
+
+On Vercel, add the three variables as **Project → Settings → Environment Variables**
+(`RAZORPAY_KEY_SECRET` should be marked *sensitive* / *encrypted*). `VITE_RAZORPAY_KEY_ID` is read
+at build time, so redeploy after changing it.
+
+### Where the code lives
+
+| Path | Purpose |
+| --- | --- |
+| `api/create-order.ts` | Vercel serverless function that creates the Razorpay order. |
+| `api/verify-payment.ts` | Vercel serverless function that verifies the payment signature. |
+| `razorpay-api.ts` | Shared server helpers (SDK client, order creation, HMAC verification). |
+| `shared/currency.ts` | Currency table, minor-unit conversion and formatting. |
+| `src/components/SupportSection.tsx` | The "Buy me a coffee" UI. |
+| `src/utils/razorpay.ts` | Checkout script loader and browser helpers. |
+| `server.ts` | The local Express backend mirrors both endpoints (`/api/create-order`, `/api/verify-payment`). |
+
+> International currencies require **international transactions** to be enabled on the Razorpay
+> account; otherwise Razorpay rejects the order and the error is shown in the section.
 
 ---
 
@@ -47,13 +97,16 @@ To enable local FFmpeg transcoding for all 9 formats with the Node.js Express se
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/imkathir/kathir-tts-studio.git
-cd kathir-tts-studio
+git clone https://github.com/imkathir/kathir-audio-studio.git
+cd kathir-audio-studio
 
 # 2. Install dependencies
 npm install
 
-# 3. Start development server (Express backend + Vite frontend)
+# 3. Add your Razorpay keys (optional, enables the coffee section)
+cp .env.example .env
+
+# 4. Start development server (Express backend + Vite frontend)
 npm run dev
 ```
 
