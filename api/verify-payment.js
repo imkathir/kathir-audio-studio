@@ -1,24 +1,25 @@
 /**
- * POST /api/verify-payment
+ * POST /api/verify-payment  (CommonJS, fully self-contained)
  *
  * Verifies the Razorpay checkout signature with the key secret:
  *   HMAC-SHA256(order_id + "|" + payment_id, KEY_SECRET) === razorpay_signature
- * A payment is only reported as successful when the signatures match.
+ * The payment is only accepted when the signatures match.
  */
-import { isRazorpayConfigured, verifyRazorpaySignature } from '../razorpay-api';
-import { ApiRequest, ApiResponse } from '../shared/api-types';
+const crypto = require('crypto');
 
-export default async function handler(req: ApiRequest, res: ApiResponse) {
-  res.setHeader('Cache-Control', 'no-store');
-
+module.exports = async function handler(req, res) {
   try {
+    res.setHeader('Cache-Control', 'no-store');
+
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST');
       res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
       return;
     }
 
-    if (!isRazorpayConfigured()) {
+    const keySecret = (process.env.RAZORPAY_KEY_SECRET || '').trim();
+
+    if (!keySecret) {
       res.status(500).json({
         success: false,
         error: 'Razorpay is not configured on the server (missing RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET).',
@@ -40,7 +41,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
 
-    const verified = verifyRazorpaySignature({ orderId, paymentId, signature });
+    const expected = crypto
+      .createHmac('sha256', keySecret)
+      .update(`${orderId}|${paymentId}`)
+      .digest('hex');
+
+    const given = Buffer.from(signature, 'utf8');
+    const expectedBuf = Buffer.from(expected, 'utf8');
+
+    const verified =
+      given.length === expectedBuf.length && crypto.timingSafeEqual(given, expectedBuf);
 
     if (!verified) {
       res.status(400).json({
@@ -57,12 +67,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       order_id: orderId,
       payment_id: paymentId,
     });
-  } catch (err: any) {
-    console.error('[razorpay] verify-payment failed:', err?.message || err);
+  } catch (err) {
+    console.error('[razorpay] verify-payment failed:', err && err.message);
     res.status(500).json({
       success: false,
       verified: false,
-      error: err?.message || 'Payment verification failed.',
+      error: (err && err.message) || 'Payment verification failed.',
     });
   }
-}
+};
