@@ -77,26 +77,32 @@ export const TopBar: React.FC<TopBarProps> = ({
           </nav>
 
           {/* Theme Palette Bar */}
-          <div className="flex items-center gap-1.5 rounded-lg border border-[var(--border-color)] bg-[var(--bg-surface)] p-1">
-            <Palette className="h-3.5 w-3.5 text-[var(--text-muted)] ml-1 mr-0.5" />
-            <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2 rounded-xl border border-[var(--border-color)] bg-[var(--bg-surface)] p-1.5 shadow-sm">
+            <Palette className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+            <div className="flex items-center gap-1.5">
               {THEMES.map((t) => (
                 <button
                   key={t.id}
                   type="button"
                   onClick={() => onSelectTheme(t.id)}
                   title={`Switch to ${t.name} theme`}
-                  className={`h-5 w-5 rounded-full ${t.color} flex items-center justify-center transition-transform hover:scale-110 ${
-                    currentTheme === t.id
-                      ? 'ring-2 ring-offset-1 ring-[var(--accent-primary)] ring-offset-[var(--bg-main)] scale-105'
-                      : 'opacity-70 hover:opacity-100'
-                  }`}
                   aria-label={t.name}
+                  aria-pressed={currentTheme === t.id}
+                  className={`flex h-6 w-6 cursor-pointer items-center justify-center rounded-full ${t.color} transition-all duration-150 hover:scale-110 focus-visible:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-surface)] ${
+                    currentTheme === t.id
+                      ? 'scale-110 ring-2 ring-[var(--accent-primary)] ring-offset-2 ring-offset-[var(--bg-surface)] shadow-[0_2px_8px_rgba(0,0,0,0.35)]'
+                      : 'opacity-90 shadow-[0_0_0_1px_rgba(148,163,184,0.55)] hover:opacity-100 hover:shadow-[0_0_0_1px_rgba(203,213,225,0.9)]'
+                  }`}
                 >
-                  {currentTheme === t.id && <Check className="h-2.5 w-2.5 text-white stroke-[3]" />}
+                  {currentTheme === t.id && (
+                    <Check className="h-3 w-3 text-white stroke-[3.5] drop-shadow-[0_1px_2px_rgba(0,0,0,0.65)]" />
+                  )}
                 </button>
               ))}
             </div>
+            <span className="hidden pr-1 text-[11px] font-semibold text-[var(--text-muted)] xl:inline">
+              {THEMES.find((t) => t.id === currentTheme)?.name}
+            </span>
           </div>
         </div>
 
