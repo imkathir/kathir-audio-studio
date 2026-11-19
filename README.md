@@ -71,13 +71,20 @@ at build time, so redeploy after changing it.
 
 | Path | Purpose |
 | --- | --- |
-| `api/create-order.ts` | Vercel serverless function that creates the Razorpay order. |
-| `api/verify-payment.ts` | Vercel serverless function that verifies the payment signature. |
-| `razorpay-api.ts` | Shared server helpers (SDK client, order creation, HMAC verification). |
+| `api/create-order.js` | Vercel serverless function that creates the Razorpay order (official SDK, with a REST fallback). |
+| `api/verify-payment.js` | Vercel serverless function that verifies the payment signature. |
+| `api/package.json` | Marks the `/api` directory as CommonJS (see the note below). |
 | `shared/currency.ts` | Currency table, minor-unit conversion and formatting. |
 | `src/components/SupportSection.tsx` | The "Buy me a coffee" UI. |
 | `src/utils/razorpay.ts` | Checkout script loader and browser helpers. |
-| `server.ts` | The local Express backend mirrors both endpoints (`/api/create-order`, `/api/verify-payment`). |
+| `server.ts` | The local Express backend mounts the very same two handlers. |
+
+> **Why is `/api` CommonJS?** Vercel compiles ES module syntax to CommonJS *unless* the nearest
+> `package.json` declares `"type": "module"`. The root `package.json` does declare it (the Vite app
+> and `server.ts` need it), so `/api/package.json` pins the serverless functions to CommonJS -
+> otherwise every request fails with `FUNCTION_INVOCATION_FAILED`. The handlers are also
+> self-contained (no cross-file imports) and use the global `fetch` for the Razorpay REST API, with
+> the `razorpay` SDK as the primary path.
 
 > International currencies require **international transactions** to be enabled on the Razorpay
 > account; otherwise Razorpay rejects the order and the error is shown in the section.
