@@ -87,8 +87,16 @@ await act(async () => {
 });
 check('user text typed', textarea().value === myText);
 
+// --- 3. (default: the stable female model is selected, testing ones hidden)
 // --- 3. the user picks a female model, then a custom one (Zephyr) --------------
 await click(buttonByText('👩Female'));
+// testing voices are hidden by default; reveal them before picking one
+await act(async () => {
+  const toggle = Array.from(doc.querySelectorAll('button')).find((b) =>
+    (b.textContent ?? '').startsWith('Show testing voices')
+  );
+  toggle?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+});
 await act(async () => {
   selectOption(voiceSelect(), 'Zephyr');
 });

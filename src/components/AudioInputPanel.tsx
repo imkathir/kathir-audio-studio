@@ -213,6 +213,8 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
   const [showEngineInfo, setShowEngineInfo] = useState<boolean>(false);
   const [isBrowserSpeaking, setIsBrowserSpeaking] = useState<boolean>(false);
   const [presetNotice, setPresetNotice] = useState<string>('');
+  // Testing voices stay hidden until the user asks for them.
+  const [showTestingVoices, setShowTestingVoices] = useState(false);
 
   // Tracks the text/title the app filled in by itself (the default sample or the last
   // preset). Anything else is treated as content the user wrote and is never overwritten
@@ -315,6 +317,23 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
    * sample text (the default one or the last preset); once the user types their own
    * content it is kept and only the voice settings change.
    */
+  const VOICE_CHOICES: Record<'female' | 'male', { value: string; label: string }[]> = {
+    female: [
+      { value: 'Kore', label: 'Kore - Calm Studio Narrator (Natural Female) - Stable' },
+      { value: 'Zephyr', label: 'Zephyr - Bright & Melodic (Natural Female) - Testing' },
+    ],
+    male: [
+      { value: 'Charon', label: 'Charon - Deep Natural Male (Authentic Baritone) - Testing' },
+      { value: 'Fenrir', label: 'Fenrir - Authoritative & Confident Male - Testing' },
+      { value: 'Puck', label: 'Puck - Lively & Conversational Male - Testing' },
+    ],
+  };
+  const stableVoiceOptions = VOICE_CHOICES[gender].filter((o) => STABLE_VOICES.includes(o.value));
+  const testingVoiceOptions = VOICE_CHOICES[gender].filter((o) => !STABLE_VOICES.includes(o.value));
+  const visibleVoiceOptions = showTestingVoices
+    ? [...stableVoiceOptions, ...testingVoiceOptions]
+    : stableVoiceOptions;
+
   const handleApplyPreset = (preset: PresetTemplate) => {
     const textIsAuto = text === autoTextRef.current;
     const titleIsAuto = title === autoTitleRef.current;
@@ -334,6 +353,7 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
     setGender(preset.gender);
     voiceByGenderRef.current[preset.gender] = preset.voice;
     setVoice(preset.voice);
+    setShowTestingVoices(!STABLE_VOICES.includes(preset.voice));
     setSpeechStyle(preset.speechStyle);
 
     setPresetNotice(
@@ -349,6 +369,7 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
     voiceByGenderRef.current[gender] = voice;
     setGender(next);
     setVoice(voiceByGenderRef.current[next]);
+    setShowTestingVoices(!STABLE_VOICES.includes(voiceByGenderRef.current[next]));
   };
 
   /** Picks a voice model directly - the text content is left untouched. */
@@ -662,23 +683,32 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
               onChange={(e) => handleSelectVoice(e.target.value)}
               className="w-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-input)] px-3 py-2 text-xs text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-primary)]"
             >
-              {gender === 'female' ? (
-                <>
-                  <option value="Kore">Kore - Calm Studio Narrator (Natural Female) - Stable</option>
-                  <option value="Zephyr">Zephyr - Bright &amp; Melodic (Natural Female) - Testing</option>
-                </>
-              ) : (
-                <>
-                  <option value="Charon">Charon - Deep Natural Male (Authentic Baritone) - Testing</option>
-                  <option value="Fenrir">Fenrir - Authoritative &amp; Confident Male - Testing</option>
-                  <option value="Puck">Puck - Lively &amp; Conversational Male - Testing</option>
-                </>
+              {visibleVoiceOptions.length === 0 && (
+                <option value="" disabled>
+                  No stable {gender} voice yet - click "Show testing voices"
+                </option>
               )}
+              {visibleVoiceOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
             </select>
+            {testingVoiceOptions.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowTestingVoices((v) => !v)}
+                className="mt-1.5 cursor-pointer text-[11px] font-medium text-[var(--accent-primary)] hover:underline"
+              >
+                {showTestingVoices ? 'Hide testing voices' : `Show testing voices (${testingVoiceOptions.length})`}
+              </button>
+            )}
             {!STABLE_VOICES.includes(voice) && (
               <p className="mt-1.5 flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400">
                 <Info className="h-3 w-3 shrink-0" />
-                <span>This voice model is under testing and may be unstable. Check the audio before sharing.</span>
+                <span>
+                  Testing voice selected ({voice}). It may be unstable. Check the audio before sharing.
+                </span>
               </p>
             )}
           </div>
