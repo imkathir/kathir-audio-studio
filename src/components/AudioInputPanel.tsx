@@ -122,6 +122,10 @@ const DEFAULT_SAMPLE_TEXT =
   'Welcome to Kathir Text to Speech Studio. Convert any text into crystal clear audio files instantly.';
 const DEFAULT_SAMPLE_TITLE = 'Kathir_Speech';
 
+// Only these models are considered stable. Everything else is shown as "Testing".
+const STABLE_PRESET_IDS = ['en-welcome']; // English Female (Kore)
+const STABLE_VOICES = ['Kore'];
+
 const PRESETS: PresetTemplate[] = [
   {
     id: 'ta-male',
@@ -496,7 +500,9 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
         >
           Sample Languages:
         </span>
-        {PRESETS.map((preset) => (
+        {PRESETS.map((preset) => {
+          const stable = STABLE_PRESET_IDS.includes(preset.id);
+          return (
           <button
             key={preset.id}
             type="button"
@@ -507,8 +513,21 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
             <span>{preset.flag}</span>
             <span>{preset.label}</span>
             <span className="text-[10px] text-[var(--text-muted)] font-mono">({preset.gender === 'female' ? '♀' : '♂'})</span>
+            {stable ? (
+              <span className="rounded bg-emerald-500/15 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-emerald-500">Stable</span>
+            ) : (
+              <span className="rounded bg-amber-500/15 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-amber-500">Testing</span>
+            )}
           </button>
-        ))}
+          );
+        })}
+      </div>
+
+      <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-600 dark:text-amber-400">
+        <span className="font-bold">Model stability:</span>
+        <span>
+          Only <strong>English Female</strong> is stable. The other voice models are still under testing and may sound inconsistent or fail. Use them for trials only.
+        </span>
       </div>
 
       {/* Notice explaining what the last model switch did */}
@@ -645,17 +664,23 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
             >
               {gender === 'female' ? (
                 <>
-                  <option value="Kore">Kore - Calm Studio Narrator (Natural Female)</option>
-                  <option value="Zephyr">Zephyr - Bright &amp; Melodic (Natural Female)</option>
+                  <option value="Kore">Kore - Calm Studio Narrator (Natural Female) - Stable</option>
+                  <option value="Zephyr">Zephyr - Bright &amp; Melodic (Natural Female) - Testing</option>
                 </>
               ) : (
                 <>
-                  <option value="Charon">Charon - Deep Natural Male (Authentic Baritone)</option>
-                  <option value="Fenrir">Fenrir - Authoritative &amp; Confident Male</option>
-                  <option value="Puck">Puck - Lively &amp; Conversational Male</option>
+                  <option value="Charon">Charon - Deep Natural Male (Authentic Baritone) - Testing</option>
+                  <option value="Fenrir">Fenrir - Authoritative &amp; Confident Male - Testing</option>
+                  <option value="Puck">Puck - Lively &amp; Conversational Male - Testing</option>
                 </>
               )}
             </select>
+            {!STABLE_VOICES.includes(voice) && (
+              <p className="mt-1.5 flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400">
+                <Info className="h-3 w-3 shrink-0" />
+                <span>This voice model is under testing and may be unstable. Check the audio before sharing.</span>
+              </p>
+            )}
           </div>
         </div>
 
