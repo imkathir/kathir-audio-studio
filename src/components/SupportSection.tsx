@@ -48,9 +48,9 @@ export const SupportSection: React.FC<SupportSectionProps> = ({ sectionRef }) =>
   const amountIsValid = Number.isFinite(numericAmount) && numericAmount > 0;
   const minimumMajor = MIN_ORDER_AMOUNT / Math.pow(10, currency.exponent);
   const configured = isRazorpayConfigured();
-  // The payment API runs on Vercel only; the GitHub Pages copy links to it instead.
+  // The order and verification API runs on Vercel (it holds the key secret). The GitHub Pages copy calls it directly.
   const onGithubPages = typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
-  const PAYMENT_SITE = 'https://kathir-audio-studio.vercel.app/#support';
+  const PAYMENT_API = 'https://kathir-audio-studio.vercel.app';
   const busy = state === 'creating' || state === 'verifying';
 
   const applyCurrency = (code: string) => {
@@ -118,7 +118,7 @@ export const SupportSection: React.FC<SupportSectionProps> = ({ sectionRef }) =>
       return;
     }
 
-    const base = getApiBase();
+    const base = onGithubPages ? PAYMENT_API : getApiBase();
     setState('creating');
 
     try {
@@ -348,7 +348,7 @@ export const SupportSection: React.FC<SupportSectionProps> = ({ sectionRef }) =>
               <button
                 type="button"
                 onClick={handleDonate}
-                disabled={busy || !configured || onGithubPages}
+                disabled={busy || !configured}
                 style={{ backgroundImage: 'var(--accent-gradient)' }}
                 className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold text-white shadow-md shadow-[var(--accent-primary)]/30 transition-all hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -370,20 +370,10 @@ export const SupportSection: React.FC<SupportSectionProps> = ({ sectionRef }) =>
                 )}
               </button>
 
-              {onGithubPages ? (
-                <p className="text-center text-[11px] text-[var(--text-muted)]">
-                  Payments are handled on{' '}
-                  <a href={PAYMENT_SITE} className="font-semibold text-[var(--accent-primary)] underline cursor-pointer">
-                    kathir-audio-studio.vercel.app
-                  </a>
-                  .
-                </p>
-              ) : (
-                <p className="text-center text-[11px] text-[var(--text-muted)]">
-                  Minimum {formatAmount(minimumMajor, currency.code)} - settle in your own currency,
-                  received in INR.
-                </p>
-              )}
+              <p className="text-center text-[11px] text-[var(--text-muted)]">
+                Minimum {formatAmount(minimumMajor, currency.code)} - settle in your own currency,
+                received in INR.
+              </p>
             </div>
           )}
         </div>

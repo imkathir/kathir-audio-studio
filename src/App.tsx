@@ -8,7 +8,7 @@ import { SupportSection } from './components/SupportSection';
 import { audioService } from './services/audio-service';
 import { AudioJob, FormatItem, ColorTheme, ConversionProgressInfo } from './types';
 import { Volume2, Sparkles, CheckCircle2, ShieldCheck, Music2, Apple, Smartphone, Info } from 'lucide-react';
-import { createStaticPagesJob } from './utils/client-tts';
+import { createStaticPagesJob, normalizeMp3Bitrate } from './utils/client-tts';
 import { Logo } from './components/Logo';
 
 export default function App() {
@@ -106,7 +106,7 @@ export default function App() {
     // On GitHub Pages / Vercel (or static hosting without custom backend), execute the client-side neural engine
     if (isStaticHost && !customBackend) {
       try {
-        const clientJob = await createStaticPagesJob(params, (info) => {
+        const clientJob = await createStaticPagesJob({ ...params, mp3Bitrate: normalizeMp3Bitrate(params.bitrate) }, (info) => {
           setProgressInfo(info);
           setConversionProgress(info.statusText);
         });
@@ -188,7 +188,7 @@ export default function App() {
     } catch (err: any) {
       console.warn('Backend synthesis unavailable or failed, using browser speech engine:', err);
       try {
-        const clientJob = await createStaticPagesJob(params, (info) => {
+        const clientJob = await createStaticPagesJob({ ...params, mp3Bitrate: normalizeMp3Bitrate(params.bitrate) }, (info) => {
           setProgressInfo(info);
           setConversionProgress(info.statusText);
         });
@@ -213,7 +213,7 @@ export default function App() {
       language: 'auto',
       speechStyle: 'Clear, natural studio voice',
       sampleRate: 44100,
-      bitrate: '192k',
+      bitrate: '128k',
       title: 'kathirStudio_Welcome',
       formats: ['mp3', 'm4a'],
       isAutoInit: true,

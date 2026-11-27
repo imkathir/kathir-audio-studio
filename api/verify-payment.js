@@ -7,7 +7,26 @@
  */
 const crypto = require('crypto');
 
+/** Origins allowed to call the payment API from a browser (the GitHub Pages copy of the site). */
+const ALLOWED_ORIGINS = ['https://imkathir.github.io'];
+
+function applyCors(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  res.setHeader('Vary', 'Origin');
+}
+
 module.exports = async function handler(req, res) {
+  applyCors(req, res);
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
   try {
     res.setHeader('Cache-Control', 'no-store');
 

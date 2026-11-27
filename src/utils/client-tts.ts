@@ -281,6 +281,15 @@ function applyAntiClickFade(samples: Int16Array, fadeLen = 320): void {
   }
 }
 
+/** Bitrates offered for MP3 output. The source is mono speech, so higher rates add size without audible gain. */
+export const MP3_BITRATE_OPTIONS = [64, 96, 128] as const;
+
+/** Maps any requested value to an allowed MP3 bitrate (kbps). Defaults to 128. */
+export function normalizeMp3Bitrate(value: unknown): number {
+  const n = typeof value === 'string' ? parseInt(value, 10) : Number(value);
+  return (MP3_BITRATE_OPTIONS as readonly number[]).includes(n) ? n : 128;
+}
+
 /**
  * Encode raw 16-bit PCM audio samples into a true, valid MP3 audio file in the browser.
  */
@@ -579,9 +588,10 @@ export async function generateSpeechWavBytesAsync(
   text: string,
   gender: 'female' | 'male' = 'female',
   onProgress?: (info: ConversionProgressInfo) => void,
-  options?: { language?: string; voice?: Partial<VoiceOptions> }
+  options?: { language?: string; voice?: Partial<VoiceOptions>; mp3Bitrate?: number }
 ): Promise<{ blob: Blob; mp3Blob: Blob | null; duration: number; engineLabel: string; sampleRate: number }> {
   const voice = normalizeVoiceOptions(options?.voice);
+  const mp3Bitrate = normalizeMp3Bitrate(options?.mp3Bitrate);
   const specs = buildChunkSpecs(text, voice.pronunciations, 320);
   const totalChunks = specs.length;
   const totalChars = text.length;
@@ -764,7 +774,7 @@ export async function generateSpeechWavBytesAsync(
   const masterWavBlob = new Blob([fullWav], { type: 'audio/wav' });
 
   // 2. Encode to Genuine MPEG Layer-3 (MP3) Blob
-  const mp3Blob = encodePcmToMp3Blob(mergedSamples, sampleRate, 128);
+  const mp3Blob = encodePcmToMp3Blob(mergedSamples, sampleRate, mp3Bitrate);
 
   onProgress?.({
     status: 'completed',
@@ -930,9 +940,11 @@ export async function createStaticPagesJob(
     formats: string[];
     isAutoInit?: boolean;
     voiceOptions?: Partial<VoiceOptions>;
+    mp3Bitrate?: number;
   },
   onProgress?: (info: ConversionProgressInfo) => void
 ): Promise<AudioJob> {
+  const mp3Bitrate = normalizeMp3Bitrate(params.mp3Bitrate);
   const langCode = (params.language === 'auto' ? 'en' : params.language).split('-')[0].toLowerCase();
   const jobId = `client_${Date.now()}`;
   const cleanTitle = (params.title || 'Kathir_Audio').trim().replace(/[^a-zA-Z0-9_\-]/g, '_') || 'Kathir_Audio';
@@ -944,6 +956,7 @@ export async function createStaticPagesJob(
     {
       language: langCode,
       voice: params.voiceOptions,
+      mp3Bitrate,
     }
   );
 
@@ -969,7 +982,12 @@ export async function createStaticPagesJob(
       fileName: `${cleanTitle}.${spec.ext}`,
       mimeType: spec.mime,
       size: targetSize,
-      codec: key === 'wav' ? `Linear PCM 16-bit ${(sampleRate / 1000).toFixed(1)}kHz` : spec.codec,
+      codec:
+        key === 'wav'
+          ? `Linear PCM 16-bit ${(sampleRate / 1000).toFixed(1)}kHz`
+          : key === 'mp3'
+            ? `MPEG-1 Layer 3 (${mp3Bitrate} kbps, mono)`
+            : spec.codec,
       label: spec.label,
       category: spec.category,
       recommendedFor: spec.desc,

@@ -223,7 +223,7 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
   const [voice, setVoice] = useState<string>('Kore');
   const [speechStyle, setSpeechStyle] = useState<string>('Clear, natural studio voice');
   const [sampleRate, setSampleRate] = useState<number>(44100);
-  const [bitrate, setBitrate] = useState<string>('192k');
+  const [bitrate, setBitrate] = useState<string>('128k');
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [showEngineInfo, setShowEngineInfo] = useState<boolean>(false);
   const [isBrowserSpeaking, setIsBrowserSpeaking] = useState<boolean>(false);
@@ -1167,9 +1167,9 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
                   onChange={(e) => setBitrate(e.target.value)}
                   className="w-full rounded border border-[var(--border-color)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
                 >
-                  <option value="320k">320 kbps (High Fidelity)</option>
-                  <option value="192k">192 kbps (Standard High Quality)</option>
-                  <option value="128k">128 kbps (Compact Mobile)</option>
+                  <option value="128k">128 kbps (Standard, about 0.96 MB per minute)</option>
+                  <option value="96k">96 kbps (Smaller, about 0.72 MB per minute)</option>
+                  <option value="64k">64 kbps (Smallest, about 0.48 MB per minute)</option>
                 </select>
               </div>
 
