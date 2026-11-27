@@ -1,0 +1,26 @@
+{
+  "name": "kathirStudio - Free Text to Voice Converter",
+  "short_name": "kathirStudio",
+  "description": "Convert any text into natural speech and download it as MP3, M4A, M4R, WAV, FLAC, OGG, OPUS, AIFF or CAF. Free, no signup, unlimited length.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d1217",
+  "theme_color": "#6366f1",
+  "categories": ["productivity", "multimedia", "utilities"],
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
