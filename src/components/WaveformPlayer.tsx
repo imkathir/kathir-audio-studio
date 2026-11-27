@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from 'react';
-import { Play, Pause, Square, Repeat, Volume2, VolumeX, Globe, User } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Play, Pause, Square, Repeat, Volume2, VolumeX, Globe, User, SkipBack, SkipForward } from 'lucide-react';
 import { audioService } from '../services/audio-service';
 import { AudioJob, FormatItem } from '../types';
 
@@ -26,6 +26,62 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const [loopStart, setLoopStart] = useState<number | null>(null);
+  const [loopEnd, setLoopEnd] = useState<number | null>(null);
+
+  // Reset A-B markers whenever a new conversion is loaded
+  useEffect(() => {
+    setLoopStart(null);
+    setLoopEnd(null);
+    audioService.setLoopRange(null);
+  }, [currentJob?.jobId]);
+
+  // Keyboard shortcuts (ignored while typing in a field)
+  useEffect(() => {
+    if (!currentJob) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.code === 'Space' && tag !== 'BUTTON') {
+        e.preventDefault();
+        audioService.togglePlayPause();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        audioService.skip(e.shiftKey ? 10 : 5);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        audioService.skip(e.shiftKey ? -10 : -5);
+      } else if (e.key.toLowerCase() === 'm') {
+        audioService.setVolume(audioService.volume > 0 ? 0 : 1);
+      } else if (e.key.toLowerCase() === 'l') {
+        audioService.toggleLoop();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [currentJob]);
+
+  const markLoopStart = () => {
+    const t = audioService.currentTime;
+    setLoopStart(t);
+    if (loopEnd !== null && loopEnd <= t) setLoopEnd(null);
+    audioService.setLoopRange(null);
+  };
+
+  const markLoopEnd = () => {
+    const t = audioService.currentTime;
+    if (loopStart === null || t <= loopStart) return;
+    setLoopEnd(t);
+    audioService.setLoopRange({ start: loopStart, end: t });
+  };
+
+  const clearLoop = () => {
+    setLoopStart(null);
+    setLoopEnd(null);
+    audioService.setLoopRange(null);
+  };
 
   const formatTime = (secs: number) => {
     if (isNaN(secs)) return '0:00';
@@ -237,11 +293,31 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => audioService.skip(-10)}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border-color)] bg-[var(--bg-input)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
+            aria-label="Back 10 seconds"
+            title="Back 10 seconds (Shift+← also works)"
+          >
+            <SkipBack className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
             onClick={() => audioService.togglePlayPause()}
             className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent-primary)] hover:brightness-110 text-white shadow-md shadow-[var(--accent-primary)]/30 transition-all active:scale-95 cursor-pointer"
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => audioService.skip(10)}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border-color)] bg-[var(--bg-input)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
+            aria-label="Forward 10 seconds"
+            title="Forward 10 seconds (Shift+→ also works)"
+          >
+            <SkipForward className="h-3.5 w-3.5" />
           </button>
 
           <button
@@ -271,7 +347,7 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
         {/* Speed Controls */}
         <div className="flex items-center gap-1 bg-[var(--bg-input)] p-1 rounded-lg border border-[var(--border-color)]">
           <span className="text-[11px] text-[var(--text-muted)] px-1.5 font-medium">Speed:</span>
-          {[0.75, 1.0, 1.25, 1.5].map((rate) => (
+          {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((rate) => (
             <button
               key={rate}
               type="button"
@@ -307,6 +383,40 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
             aria-label="Volume slider"
           />
         </div>
+      </div>
+
+      {/* A-B loop */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
+        <span className="font-medium">Loop section:</span>
+        <button
+          type="button"
+          onClick={markLoopStart}
+          className="rounded-md border border-[var(--border-color)] bg-[var(--bg-input)] px-2 py-1 font-mono text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer"
+          title="Set the loop start at the current position"
+        >
+          Set A {loopStart !== null ? `(${formatTime(loopStart)})` : ''}
+        </button>
+        <button
+          type="button"
+          onClick={markLoopEnd}
+          disabled={loopStart === null}
+          className="rounded-md border border-[var(--border-color)] bg-[var(--bg-input)] px-2 py-1 font-mono text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+          title="Set the loop end at the current position"
+        >
+          Set B {loopEnd !== null ? `(${formatTime(loopEnd)})` : ''}
+        </button>
+        {(loopStart !== null || loopEnd !== null) && (
+          <button
+            type="button"
+            onClick={clearLoop}
+            className="rounded-md px-2 py-1 font-medium text-[var(--accent-primary)] hover:underline cursor-pointer"
+          >
+            Clear
+          </button>
+        )}
+        <span className="ml-auto hidden sm:inline">
+          Keys: Space play · ←/→ ±5s (Shift ±10s) · M mute · L loop
+        </span>
       </div>
     </div>
   );

@@ -13,6 +13,8 @@ class AudioPlaybackService {
   public volume: number = 1.0;
   public playbackRate: number = 1.0;
   public isLooping: boolean = false;
+  /** A-B loop range in seconds; playback jumps back to start when it reaches end. */
+  public loopRange: { start: number; end: number } | null = null;
   public activeFormat: FormatItem | null = null;
   public currentJob: AudioJob | null = null;
   public formatFallbackNotice: string | null = null;
@@ -80,9 +82,15 @@ class AudioPlaybackService {
   private playHtmlAudio(job: AudioJob, format: FormatItem): void {
     if (!this.audio) {
       this.audio = new Audio();
+      // Keep pitch when the speed changes (default in modern browsers, set explicitly here)
+      (this.audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
 
       this.audio.addEventListener('timeupdate', () => {
         if (this.audio) {
+          const range = this.loopRange;
+          if (range && this.audio.currentTime >= range.end) {
+            this.audio.currentTime = range.start;
+          }
           this.currentTime = this.audio.currentTime;
           this.notify();
         }
@@ -328,6 +336,17 @@ class AudioPlaybackService {
     if (this.audio && !this.isSpeechActive) {
       this.audio.currentTime = this.currentTime;
     }
+    this.notify();
+  }
+
+  /** Jump forwards or backwards by `delta` seconds. */
+  public skip(delta: number): void {
+    const now = this.audio && !this.isSpeechActive ? this.audio.currentTime : this.currentTime;
+    this.seek(now + delta);
+  }
+
+  public setLoopRange(range: { start: number; end: number } | null): void {
+    this.loopRange = range && range.end > range.start ? range : null;
     this.notify();
   }
 

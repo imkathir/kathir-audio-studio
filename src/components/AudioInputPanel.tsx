@@ -2,6 +2,10 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Volume2,
   Sliders,
+  SlidersHorizontal,
+  Play,
+  Loader2,
+  RotateCcw,
   ArrowRight,
   Sparkles,
   Globe,
@@ -17,6 +21,16 @@ import {
   Info,
 } from 'lucide-react';
 import { PresetTemplate, FormatOption, ConversionProgressInfo } from '../types';
+import { generateVoicePreview } from '../utils/client-tts';
+import {
+  DEFAULT_VOICE_OPTIONS,
+  PAUSE_LIMITS,
+  PITCH_LIMITS,
+  SPEED_LIMITS,
+  VoiceOptions,
+  normalizeVoiceOptions,
+  parsePronunciationDictionary,
+} from '../utils/speech-controls';
 import { SUPPORTED_LANGUAGES, detectLanguage } from '../utils/language';
 
 export const AVAILABLE_FORMATS: FormatOption[] = [
@@ -112,6 +126,7 @@ interface AudioInputPanelProps {
     bitrate: string;
     title: string;
     formats: string[];
+    voiceOptions?: Partial<VoiceOptions>;
   }) => void;
   isConverting: boolean;
   conversionProgress: string;
@@ -213,6 +228,16 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
   const [showEngineInfo, setShowEngineInfo] = useState<boolean>(false);
   const [isBrowserSpeaking, setIsBrowserSpeaking] = useState<boolean>(false);
   const [presetNotice, setPresetNotice] = useState<string>('');
+  // Voice tuning (speed, pitch, pauses, pronunciations)
+  const [showTuning, setShowTuning] = useState<boolean>(true);
+  const [speed, setSpeed] = useState<number>(DEFAULT_VOICE_OPTIONS.speed);
+  const [pitchSemitones, setPitchSemitones] = useState<number>(DEFAULT_VOICE_OPTIONS.pitchSemitones);
+  const [pauseScale, setPauseScale] = useState<number>(DEFAULT_VOICE_OPTIONS.pauseScale);
+  const [pronunciationText, setPronunciationText] = useState<string>('');
+  const [isPreviewing, setIsPreviewing] = useState<boolean>(false);
+  const [previewError, setPreviewError] = useState<string>('');
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
   // Testing voices stay hidden until the user asks for them.
   const [showTestingVoices, setShowTestingVoices] = useState(false);
 
@@ -378,6 +403,52 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
     setVoice(next);
   };
 
+  const pronunciationEntries = useMemo(() => parsePronunciationDictionary(pronunciationText), [pronunciationText]);
+  const voiceOptions = useMemo(
+    () => normalizeVoiceOptions({ speed, pitchSemitones, pauseScale, pronunciations: pronunciationEntries }),
+    [speed, pitchSemitones, pauseScale, pronunciationEntries]
+  );
+
+  const stopPreview = () => {
+    previewAudioRef.current?.pause();
+    previewAudioRef.current = null;
+  };
+
+  useEffect(() => {
+    return () => {
+      stopPreview();
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    };
+  }, []);
+
+  const handlePreviewVoice = async () => {
+    if (isPreviewing) return;
+    stopPreview();
+    setPreviewError('');
+    setIsPreviewing(true);
+    try {
+      const language = selectedLanguage === 'auto' ? autoDetectedLang.code : selectedLanguage;
+      const blob = await generateVoicePreview({ language, gender, voice: voiceOptions });
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      previewUrlRef.current = url;
+      const audio = new Audio(url);
+      previewAudioRef.current = audio;
+      await audio.play();
+    } catch (err: any) {
+      setPreviewError(err?.message || 'Preview failed. Please try again.');
+    } finally {
+      setIsPreviewing(false);
+    }
+  };
+
+  const resetTuning = () => {
+    setSpeed(DEFAULT_VOICE_OPTIONS.speed);
+    setPitchSemitones(DEFAULT_VOICE_OPTIONS.pitchSemitones);
+    setPauseScale(DEFAULT_VOICE_OPTIONS.pauseScale);
+    setPronunciationText('');
+  };
+
   const handleConvert = (e: React.FormEvent) => {
     e.preventDefault();
     if (!text.trim() || isConverting || selectedFormats.length === 0) return;
@@ -393,6 +464,7 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
       bitrate,
       title: title || 'Kathir_Audio',
       formats: selectedFormats,
+      voiceOptions,
     });
   };
 
@@ -712,6 +784,125 @@ export const AudioInputPanel: React.FC<AudioInputPanelProps> = ({
               </p>
             )}
           </div>
+        </div>
+
+        {/* Voice Tuning */}
+        <div className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-input)]/50 p-4 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => setShowTuning((v) => !v)}
+              className="flex items-center gap-2 cursor-pointer"
+              aria-expanded={showTuning}
+            >
+              <SlidersHorizontal className="h-4 w-4 text-[var(--accent-primary)]" />
+              <span className="text-xs font-bold text-[var(--text-primary)]">Voice Tuning</span>
+              <span className="text-[11px] text-[var(--text-muted)]">{showTuning ? '(hide)' : '(show)'}</span>
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={resetTuning}
+                className="flex items-center gap-1 rounded-md border border-[var(--border-color)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Reset
+              </button>
+              <button
+                type="button"
+                onClick={handlePreviewVoice}
+                disabled={isPreviewing || isConverting}
+                className="flex items-center gap-1.5 rounded-md bg-[var(--accent-primary)] px-2.5 py-1 text-[11px] font-semibold text-white hover:brightness-110 disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
+              >
+                {isPreviewing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                {isPreviewing ? 'Preparing…' : 'Preview voice (3s)'}
+              </button>
+            </div>
+          </div>
+
+          {previewError && <p className="text-[11px] text-red-500">{previewError}</p>}
+
+          {showTuning && (
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-3">
+                <label className="block">
+                  <span className="flex items-center justify-between text-xs font-medium text-[var(--text-primary)]">
+                    Speed <span className="font-mono text-[var(--accent-primary)]">{speed.toFixed(2)}x</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={SPEED_LIMITS.min}
+                    max={SPEED_LIMITS.max}
+                    step={0.05}
+                    value={speed}
+                    onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                    className="mt-1.5 w-full cursor-pointer accent-[var(--accent-primary)]"
+                  />
+                  <span className="text-[10px] text-[var(--text-muted)]">Pitch stays the same</span>
+                </label>
+
+                <label className="block">
+                  <span className="flex items-center justify-between text-xs font-medium text-[var(--text-primary)]">
+                    Pitch{' '}
+                    <span className="font-mono text-[var(--accent-primary)]">
+                      {pitchSemitones > 0 ? '+' : ''}
+                      {pitchSemitones} st
+                    </span>
+                  </span>
+                  <input
+                    type="range"
+                    min={PITCH_LIMITS.min}
+                    max={PITCH_LIMITS.max}
+                    step={1}
+                    value={pitchSemitones}
+                    onChange={(e) => setPitchSemitones(parseInt(e.target.value, 10))}
+                    className="mt-1.5 w-full cursor-pointer accent-[var(--accent-primary)]"
+                  />
+                  <span className="text-[10px] text-[var(--text-muted)]">Length stays the same</span>
+                </label>
+
+                <label className="block">
+                  <span className="flex items-center justify-between text-xs font-medium text-[var(--text-primary)]">
+                    Pauses <span className="font-mono text-[var(--accent-primary)]">{pauseScale.toFixed(1)}x</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={PAUSE_LIMITS.min}
+                    max={PAUSE_LIMITS.max}
+                    step={0.1}
+                    value={pauseScale}
+                    onChange={(e) => setPauseScale(parseFloat(e.target.value))}
+                    className="mt-1.5 w-full cursor-pointer accent-[var(--accent-primary)]"
+                  />
+                  <span className="text-[10px] text-[var(--text-muted)]">Sentence and [pause] gaps</span>
+                </label>
+              </div>
+
+              <div>
+                <label htmlFor="pronunciation-dict" className="block text-xs font-medium text-[var(--text-primary)] mb-1.5">
+                  Pronunciation dictionary{' '}
+                  <span className="font-normal text-[var(--text-muted)]">
+                    ({pronunciationEntries.length} active · one per line: word = how to say it)
+                  </span>
+                </label>
+                <textarea
+                  id="pronunciation-dict"
+                  rows={3}
+                  value={pronunciationText}
+                  onChange={(e) => setPronunciationText(e.target.value)}
+                  placeholder={'kathir = kah-theer\nkathirStudio = kathir studio'}
+                  className="w-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-input)] px-3 py-2 font-mono text-xs text-[var(--text-primary)] placeholder-neutral-500 focus:border-[var(--accent-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-primary)]"
+                />
+              </div>
+
+              <p className="text-[11px] leading-relaxed text-[var(--text-muted)]">
+                <strong className="text-[var(--text-primary)]">Markup:</strong>{' '}
+                <code className="font-mono">[pause:500]</code> = 500 ms silence,{' '}
+                <code className="font-mono">[pause:1s]</code> = 1 second, and{' '}
+                <code className="font-mono">*word*</code> = emphasis (slightly slower and louder).
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Output Audio Formats Select Box Section */}

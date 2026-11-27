@@ -1,3 +1,14 @@
+import {
+  DEFAULT_VOICE_OPTIONS,
+  applyPronunciations,
+  normalizeVoiceOptions,
+  parseSpeechMarkup,
+  shapeSamples,
+  silenceSamples,
+  type ChunkShape,
+  type PronunciationEntry,
+  type VoiceOptions,
+} from './speech-controls';
 import JSZip from 'jszip';
 import {
   TtsSession,
@@ -366,11 +377,81 @@ export async function ensureSpeechEnginesLoaded(): Promise<boolean> {
  * Synthesize real human neural speech in the browser using Piper VITS ONNX models.
  * Returns null if the language isn't available or browser WASM/OPFS fails so caller can fall back cleanly.
  */
+export interface ChunkSpec {
+  text: string;
+  emphasis: boolean;
+  /** Extra silence (ms) after this chunk, from [pause:...] markers. */
+  extraPauseMs: number;
+  /** Silence (ms) before the first chunk, from leading [pause:...] markers. */
+  leadingPauseMs: number;
+  /** True when the sentence continues into the next chunk (no default sentence gap). */
+  softBreak: boolean;
+}
+
+/**
+ * Turn raw user text into synthesis chunks. Markup is parsed first (sanitising would
+ * strip the asterisks and brackets), then pronunciations are applied, then each piece
+ * is split into natural sentence-sized chunks.
+ */
+export function buildChunkSpecs(
+  input: string,
+  pronunciations: PronunciationEntry[] = [],
+  maxLen = 320
+): ChunkSpec[] {
+  const specs: ChunkSpec[] = [];
+  let leadingPauseMs = 0;
+  for (const seg of parseSpeechMarkup(input)) {
+    if (seg.kind === 'pause') {
+      if (specs.length > 0) specs[specs.length - 1].extraPauseMs += seg.ms;
+      else leadingPauseMs += seg.ms;
+      continue;
+    }
+
+    let body = seg.text;
+    const last = specs[specs.length - 1];
+    if (last) {
+      // Punctuation that opens this segment belongs to the sentence before it (e.g. "*kathir*.")
+      const lead = body.match(/^\s*([.,;:!?…]+)/);
+      if (lead) {
+        last.text = last.text.replace(/\s+$/, '') + lead[1];
+        body = body.slice(lead[0].length);
+      }
+      // A new segment that starts mid-sentence must join without a sentence-length gap
+      last.softBreak = !/[.!?…]$/.test(last.text.trim());
+    }
+    if (!body.trim()) continue;
+
+    const prepared = applyPronunciations(body, pronunciations);
+    for (const piece of splitTextIntoSentenceChunks(prepared, maxLen)) {
+      specs.push({ text: piece, emphasis: seg.emphasis, extraPauseMs: 0, leadingPauseMs: 0, softBreak: false });
+    }
+  }
+  if (specs.length === 0) {
+    specs.push({ text: 'Welcome to kathirStudio.', emphasis: false, extraPauseMs: 0, leadingPauseMs: 0, softBreak: false });
+  }
+  specs[0].leadingPauseMs = leadingPauseMs;
+  return specs;
+}
+
+/** Emphasised chunks are slightly slower and louder. */
+function chunkShape(spec: ChunkSpec, voice: VoiceOptions): ChunkShape {
+  return spec.emphasis
+    ? { speed: voice.speed * 0.92, pitchSemitones: voice.pitchSemitones, gain: 1.15 }
+    : { speed: voice.speed, pitchSemitones: voice.pitchSemitones, gain: 1 };
+}
+
+/** Silence after a chunk: the default sentence gap (none after the last chunk) plus explicit pauses. */
+function pauseAfterMs(spec: ChunkSpec, isLast: boolean, defaultGapMs: number, voice: VoiceOptions): number {
+  const gap = isLast || spec.softBreak ? 0 : defaultGapMs;
+  return (gap + spec.extraPauseMs) * voice.pauseScale;
+}
+
 async function synthesizeWithPiperNeural(
-  chunks: string[],
+  specs: ChunkSpec[],
   langCode: string,
   gender: 'female' | 'male',
   totalChars: number,
+  voice: VoiceOptions,
   onProgress?: (info: ConversionProgressInfo) => void
 ): Promise<{
   pcmArrays: Int16Array[];
@@ -383,7 +464,7 @@ async function synthesizeWithPiperNeural(
   const voiceId: VoiceId = gender === 'male' ? voicePair.male : voicePair.female;
 
   try {
-    const totalChunks = chunks.length;
+    const totalChunks = specs.length;
     if (TtsSession._instance && TtsSession._instance.voiceId !== voiceId) {
       TtsSession._instance = null;
     }
@@ -427,12 +508,12 @@ async function synthesizeWithPiperNeural(
 
     const pcmArrays: Int16Array[] = [];
     let detectedSampleRate = 22050;
-    let pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.16));
     let charsProcessed = 0;
     const startTime = Date.now();
 
     for (let i = 0; i < totalChunks; i++) {
-      const chunkText = chunks[i];
+      const spec = specs[i];
+      const chunkText = spec.text;
       charsProcessed += chunkText.length;
       const progressPercent = Math.min(94, Math.max(20, 20 + Math.round(((i + 1) / totalChunks) * 74)));
 
@@ -462,18 +543,20 @@ async function synthesizeWithPiperNeural(
         const chunkRate = wavView.getUint32(24, true);
         if (chunkRate >= 8000 && chunkRate <= 48000 && i === 0) {
           detectedSampleRate = chunkRate;
-          pauseSamples = new Int16Array(Math.round(detectedSampleRate * 0.16));
+        }
+
+        if (i === 0 && spec.leadingPauseMs > 0) {
+          pcmArrays.push(silenceSamples(detectedSampleRate, spec.leadingPauseMs * voice.pauseScale));
         }
 
         const pcmByteLen = wavBuf.byteLength - 44;
         const chunkSamples = new Int16Array(wavBuf.slice(44, 44 + pcmByteLen - (pcmByteLen % 2)));
         applyAntiClickFade(chunkSamples, 180);
         const mastered = masterNeuralAcoustics(chunkSamples, detectedSampleRate);
-        pcmArrays.push(mastered);
+        pcmArrays.push(shapeSamples(mastered, chunkShape(spec, voice)));
 
-        if (i < totalChunks - 1) {
-          pcmArrays.push(pauseSamples);
-        }
+        const gapMs = pauseAfterMs(spec, i === totalChunks - 1, 160, voice);
+        if (gapMs > 0) pcmArrays.push(silenceSamples(detectedSampleRate, gapMs));
       }
     }
 
@@ -490,16 +573,17 @@ async function synthesizeWithPiperNeural(
 
 /**
  * Asynchronously synthesize speech with real-time progress callbacks, acoustic filtering,
- * anti-click boundary smoothing, natural sentence pauses, and true MP3 encoding.
+ * anti-click boundary smoothing, natural sentence pauses, voice controls and true MP3 encoding.
  */
 export async function generateSpeechWavBytesAsync(
   text: string,
   gender: 'female' | 'male' = 'female',
   onProgress?: (info: ConversionProgressInfo) => void,
-  options?: { language?: string }
+  options?: { language?: string; voice?: Partial<VoiceOptions> }
 ): Promise<{ blob: Blob; mp3Blob: Blob | null; duration: number; engineLabel: string; sampleRate: number }> {
-  const chunks = splitTextIntoSentenceChunks(text, 320);
-  const totalChunks = chunks.length;
+  const voice = normalizeVoiceOptions(options?.voice);
+  const specs = buildChunkSpecs(text, voice.pronunciations, 320);
+  const totalChunks = specs.length;
   const totalChars = text.length;
   const langCode = ((options?.language === 'auto' ? 'en' : options?.language) || 'en').split('-')[0].toLowerCase();
 
@@ -522,13 +606,7 @@ export async function generateSpeechWavBytesAsync(
   let engineLabel = 'kathirStudio Voice Engine (4-Stage DSP Mastered)';
 
   // 1. Primary browser neural VITS human speech (cached in OPFS after first download)
-  const piperResult = await synthesizeWithPiperNeural(
-    chunks,
-    langCode,
-    gender,
-    totalChars,
-    onProgress
-  );
+  const piperResult = await synthesizeWithPiperNeural(specs, langCode, gender, totalChars, voice, onProgress);
 
   if (piperResult && piperResult.pcmArrays.length > 0) {
     pcmSampleArrays = piperResult.pcmArrays;
@@ -542,18 +620,19 @@ export async function generateSpeechWavBytesAsync(
     }
 
     // IMPORTANT: speakGenerator.js ONLY bundles 'en/en-us' ('en' causes exit(2) empty audio)
-    const voice = 'en/en-us';
+    const voiceName = 'en/en-us';
     const pitch = gender === 'female' ? 66 : 40;
     const speed = 138;
     const amplitude = 92;
     const wordgap = 1;
+    const FALLBACK_RATE = 22050;
 
-    const pauseSamples = new Int16Array(Math.round(22050 * 0.12));
     let charsProcessed = 0;
     const startTime = Date.now();
 
     for (let i = 0; i < totalChunks; i++) {
-      const chunkText = chunks[i];
+      const spec = specs[i];
+      const chunkText = spec.text;
       charsProcessed += chunkText.length;
       const progressPercent = Math.min(95, Math.round(((i + 1) / totalChunks) * 100));
 
@@ -576,9 +655,27 @@ export async function generateSpeechWavBytesAsync(
 
       await new Promise((resolve) => setTimeout(resolve, 0));
 
+      if (i === 0 && spec.leadingPauseMs > 0) {
+        pcmSampleArrays.push(silenceSamples(FALLBACK_RATE, spec.leadingPauseMs * voice.pauseScale));
+      }
+
+      const pushChunk = (mastered: Int16Array) => {
+        pcmSampleArrays.push(shapeSamples(mastered, chunkShape(spec, voice)));
+        const gapMs = pauseAfterMs(spec, i === totalChunks - 1, 120, voice);
+        if (gapMs > 0) pcmSampleArrays.push(silenceSamples(FALLBACK_RATE, gapMs));
+      };
+
+      const toPcm = (wav: Uint8Array | ArrayLike<number>) => {
+        const bytes = wav as Uint8Array;
+        const pcmBytes = bytes.subarray(44);
+        const samples = new Int16Array(pcmBytes.buffer.slice(pcmBytes.byteOffset, pcmBytes.byteOffset + pcmBytes.byteLength));
+        applyAntiClickFade(samples, 320);
+        return masterVocalAcoustics(samples, FALLBACK_RATE);
+      };
+
       try {
         const wav = win.generateSpeech(chunkText, {
-          voice,
+          voice: voiceName,
           amplitude,
           pitch,
           speed,
@@ -586,37 +683,21 @@ export async function generateSpeechWavBytesAsync(
         });
 
         if (wav && wav.length > 44) {
-          const pcmBytes = wav.subarray(44);
-          const chunkSamples = new Int16Array(
-            pcmBytes.buffer.slice(pcmBytes.byteOffset, pcmBytes.byteOffset + pcmBytes.byteLength)
-          );
-          applyAntiClickFade(chunkSamples, 320);
-          const masteredSamples = masterVocalAcoustics(chunkSamples, 22050);
-          pcmSampleArrays.push(masteredSamples);
-
-          if (i < totalChunks - 1) {
-            pcmSampleArrays.push(pauseSamples);
-          }
+          pushChunk(toPcm(wav));
         }
       } catch (chunkErr) {
         console.warn(`Chunk ${i + 1} synthesis retry with simplified text:`, chunkErr);
         try {
           const simplified = chunkText.replace(/[^a-zA-Z0-9\s.,!?]/g, ' ');
           const wav = win.generateSpeech(simplified, {
-            voice,
+            voice: voiceName,
             amplitude,
             pitch,
             speed,
             wordgap,
           });
           if (wav && wav.length > 44) {
-            const pcmBytes = wav.subarray(44);
-            const chunkSamples = new Int16Array(
-              pcmBytes.buffer.slice(pcmBytes.byteOffset, pcmBytes.byteOffset + pcmBytes.byteLength)
-            );
-            applyAntiClickFade(chunkSamples, 320);
-            const mastered = masterVocalAcoustics(chunkSamples, 22050);
-            pcmSampleArrays.push(mastered);
+            pushChunk(toPcm(wav));
           }
         } catch {
           // Graceful skip of unpronounceable token
@@ -697,6 +778,50 @@ export async function generateSpeechWavBytesAsync(
   });
 
   return { blob: masterWavBlob, mp3Blob, duration, engineLabel, sampleRate };
+}
+
+const PREVIEW_TEXTS: Record<string, string> = {
+  en: 'Hello, this is a short preview of the selected voice.',
+  ta: 'வணக்கம், இது தேர்ந்தெடுத்த குரலின் சிறிய மாதிரி.',
+  hi: 'नमस्ते, यह चुनी गई आवाज़ का एक छोटा नमूना है।',
+  es: 'Hola, esta es una breve muestra de la voz seleccionada.',
+  fr: 'Bonjour, voici un court aperçu de la voix choisie.',
+  de: 'Hallo, das ist eine kurze Vorschau der gewählten Stimme.',
+};
+
+/** Keep only the first `seconds` of a 16-bit mono WAV produced by this module. */
+function cropWavBlob(wav: Blob, seconds: number): Promise<Blob> {
+  return wav.arrayBuffer().then((buf) => {
+    const view = new DataView(buf);
+    const rate = view.getUint32(24, true);
+    const dataBytes = buf.byteLength - 44;
+    const keep = Math.min(dataBytes, Math.round(rate * seconds) * 2);
+    const out = new Uint8Array(44 + keep);
+    out.set(new Uint8Array(buf, 0, 44), 0);
+    const outView = new DataView(out.buffer);
+    outView.setUint32(4, 36 + keep, true);
+    outView.setUint32(40, keep, true);
+    out.set(new Uint8Array(buf, 44, keep), 44);
+    return new Blob([out], { type: 'audio/wav' });
+  });
+}
+
+/**
+ * Short audition clip (about 3 seconds) with the current voice, speed, pitch,
+ * pause and pronunciation settings applied.
+ */
+export async function generateVoicePreview(options: {
+  language: string;
+  gender: 'female' | 'male';
+  voice: Partial<VoiceOptions>;
+}): Promise<Blob> {
+  const lang = ((options.language === 'auto' ? 'en' : options.language) || 'en').split('-')[0].toLowerCase();
+  const text = PREVIEW_TEXTS[lang] ?? PREVIEW_TEXTS.en;
+  const { blob } = await generateSpeechWavBytesAsync(text, options.gender, undefined, {
+    language: lang,
+    voice: options.voice,
+  });
+  return cropWavBlob(blob, 3);
 }
 
 function formatDuration(sec: number): string {
@@ -804,6 +929,7 @@ export async function createStaticPagesJob(
     title: string;
     formats: string[];
     isAutoInit?: boolean;
+    voiceOptions?: Partial<VoiceOptions>;
   },
   onProgress?: (info: ConversionProgressInfo) => void
 ): Promise<AudioJob> {
@@ -817,6 +943,7 @@ export async function createStaticPagesJob(
     onProgress,
     {
       language: langCode,
+      voice: params.voiceOptions,
     }
   );
 

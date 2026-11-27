@@ -1,3 +1,4 @@
+import type { VoiceOptions } from './utils/speech-controls';
 import React, { useState, useEffect, useRef } from 'react';
 import { TopBar } from './components/TopBar';
 import { AudioInputPanel } from './components/AudioInputPanel';
@@ -77,6 +78,7 @@ export default function App() {
     title: string;
     formats: string[];
     isAutoInit?: boolean;
+    voiceOptions?: Partial<VoiceOptions>;
   }) => {
     setIsConverting(true);
     setConversionError(null);
